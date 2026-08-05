@@ -1,0 +1,15 @@
+{
+  "name": "context-bloat-guard",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Dev tooling for the context-bloat-guard Claude Code plugin. The plugin itself has zero runtime dependencies — nothing here is installed on a user's machine.",
+  "license": "MIT",
+  "scripts": {
+    "test": "node test/run.mjs",
+    "calibrate": "node scripts/calibrate.mjs"
+  },
+  "devDependencies": {
+    "@anthropic-ai/sdk": "^0.70.0"
+  }
+}
