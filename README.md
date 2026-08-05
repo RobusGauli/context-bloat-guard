@@ -13,8 +13,9 @@ There is no built-in signal for this. You find out when the session starts degra
 A `PreToolUse` hook on the `Skill` tool measures the SKILL.md that is about to load. Under the threshold it says nothing. Over it, you get a permission prompt:
 
 ```
-Skill "compound-engineering:ce-code-review" will inject ~42,900 tokens = 21% of
-your 200k window into this context, permanently for the rest of the session.
+Skill "compound-engineering:ce-code-review" will inject ~42,900 tokens = 26% of
+your 167k usable context (200k window, less the auto-compact buffer and
+reserved output) into this context, permanently for the rest of the session.
 
 Cheaper alternative: delegate it. Spawn a subagent (Agent tool) that invokes
 this skill in its own isolated context and returns only the conclusion — the
@@ -73,7 +74,7 @@ Optional. `~/.claude/context-bloat-guard.json`, all keys optional:
   "enabled": true,
   "warnThreshold": 15000,
   "denyThreshold": null,
-  "contextWindowSize": 200000,
+  "contextWindowSize": null,
   "alwaysAllow": ["my-big-but-essential-skill"],
   "logPath": null
 }
@@ -82,15 +83,30 @@ Optional. `~/.claude/context-bloat-guard.json`, all keys optional:
 | Key | Default | Meaning |
 |---|---|---|
 | `enabled` | `true` | Master off switch. |
-| `warnThreshold` | `15000` | Tokens at or above which you get asked. ~7.5% of a 200k window. |
+| `warnThreshold` | `15000` | Tokens at or above which you get asked. ~9% of a 200k window's usable budget. |
 | `denyThreshold` | `null` | Tokens at or above which the load is refused outright. Off by default — see below. |
-| `contextWindowSize` | `200000` | Only used to express the cost as a percentage. |
+| `contextWindowSize` | `null` | Only used to express the cost as a percentage. `null` detects it from the environment — see below. Set a number to override, and it is used verbatim with no buffer deducted. |
 | `alwaysAllow` | `[]` | Skill names to never prompt on. Use the invoked name, including any `plugin:skill` prefix. |
 | `logPath` | `null` | Opt-in JSONL of every skill invocation, for tuning your own threshold. `~` is expanded. Setting it disables the stat-only fast path — cheap skills get read and recorded too, otherwise the log couldn't tell you where your threshold belongs. |
 
 A missing or corrupt config file is not an error — defaults apply.
 
 Set `CCG_CONFIG` to point at a different config path (used by the test suite).
+
+### How the window is detected
+
+A percentage is only as good as its denominator, and a hardcoded `200000` was wrong for most sessions. `hooks/window.mjs` resolves it in this order, all from environment variables — no I/O, no network, nothing that could slow the hot path:
+
+1. **`contextWindowSize`** from your config, if you set a number. Taken verbatim.
+2. **`CLAUDE_CODE_MAX_CONTEXT_TOKENS`** — a hard cap set by the CLI.
+3. **`CLAUDE_CODE_AUTO_COMPACT_WINDOW`** — the figure `/context` displays.
+4. **The model's API ceiling**, clamped to the 200k base tier.
+
+Then the buffer comes off. The nominal window is not what a skill competes for: a 200k window carries a ~33k auto-compact buffer, and output tokens are reserved on top. Measured live via `/context`: a 200k window reported 167k available. `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` and `CLAUDE_CODE_MAX_OUTPUT_TOKENS` are honoured when present.
+
+Two things worth knowing about the clamp in step 4. **A model's API context window is not the window Claude Code gives its main loop** — `claude-opus-5` is 1M on the API but ran in a 200k auto-compact window in the session this was measured in, because the 1M tier is gated on account beta access that no environment variable exposes. So the model table is a *ceiling*, and the guard never guesses upward. And **the model itself usually isn't knowable** from a hook: only `$ANTHROPIC_MODEL` is readable, and it's unset unless you set it. Learning it for certain would mean parsing the transcript, which the hot path forbids. In practice step 4 yields the base tier.
+
+Every one of these variables is the CLI's private, undocumented surface — found by dumping a real hook process's environment, not from documentation. They can be renamed between versions, so every read is optional and falls through silently.
 
 ### `ask` vs `deny`
 
@@ -122,6 +138,14 @@ ANTHROPIC_API_KEY=... npm run calibrate
 Dev-only — it makes network calls and is never reachable from the hook. `tiktoken` is not used and must not be: it is OpenAI's tokenizer and undercounts Claude by 15–20%, worse on code.
 
 Calibrated 2026-08-05 against 77 fixtures (11 synthetic, 66 real SKILL.md files). Zero under-estimates; real files over-estimated +4.3% to +45.4%, median +23.3%.
+
+`scripts/models.mjs` is the same idea for the model window table in `hooks/window.mjs`: it reads `max_input_tokens` from `GET /v1/models` and prints the literal to paste in, so the constants always land in a reviewed diff.
+
+```
+ANTHROPIC_API_KEY=... npm run models
+```
+
+Also dev-only. Don't hand-write that table — writing it from memory got three of twelve rows wrong, including a 1M model recorded as 200k and two models that don't exist.
 
 The estimate is an upper bound, not a measurement, and the inflation is deliberate. **[ESTIMATION.md](ESTIMATION.md)** documents the whole method, every constant with the measurement it came from, and the drift honestly — read that before trusting a number in a warning.
 

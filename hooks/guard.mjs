@@ -21,12 +21,13 @@ import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 import { estimateTokens, BYTES_PER_TOKEN_FLOOR } from './estimate.mjs'
+import { resolveWindow, usableBudget } from './window.mjs'
 
 const DEFAULTS = {
   enabled: true,
-  warnThreshold: 15000,     // tokens; ~7.5% of a 200k window
+  warnThreshold: 15000,     // tokens; ~9% of a 200k window's usable budget
   denyThreshold: null,      // off by default — see README "ask vs deny"
-  contextWindowSize: 200000,
+  contextWindowSize: null,  // null = detect from the environment; see window.mjs
   alwaysAllow: [],
   logPath: null,            // opt-in
 }
@@ -97,15 +98,33 @@ function pct (tokens, window) {
   return window ? Math.round((tokens / window) * 100) : null
 }
 
+// The share is quoted against the USABLE budget, not the nominal window. A
+// nominal 200k window carries a ~33k auto-compact buffer and a reserved output
+// budget, so the room a skill actually competes for is materially smaller —
+// quoting the nominal figure understates every skill's cost by ~20%. The
+// nominal number is still named so the arithmetic is checkable.
+function share (tokens, config) {
+  const window = resolveWindow(config.contextWindowSize)
+  const budget = usableBudget(window)
+  if (!budget) return ''
+  const k = n => `${Math.round(n / 1000)}k`
+  const p = pct(tokens, budget)
+  // An explicitly configured window is taken at face value, so there is no
+  // buffer to explain.
+  const basis = config.contextWindowSize
+    ? `${k(budget)} usable context`
+    : `${k(budget)} usable context (${k(window)} window, less the auto-compact buffer and reserved output)`
+  return ` = ${p}% of your ${basis}`
+}
+
 // The closing line differs by decision because the two decisions reach
 // different readers. An "ask" is rendered to the user with an Approve button;
 // a "deny" is returned to the model with no prompt and no way to consent, so
 // telling it to approve would send it chasing an affordance that isn't there.
 function reason (skill, tokens, config, decision) {
-  const p = pct(tokens, config.contextWindowSize)
-  const share = p === null ? '' : ` = ${p}% of your ${Math.round(config.contextWindowSize / 1000)}k window`
+  const costShare = share(tokens, config)
   return [
-    `Skill "${skill}" will inject ~${tokens.toLocaleString()} tokens${share} into this context, permanently for the rest of the session.`,
+    `Skill "${skill}" will inject ~${tokens.toLocaleString()} tokens${costShare} into this context, permanently for the rest of the session.`,
     '',
     'Cheaper alternative: delegate it. Spawn a subagent (Agent tool) that invokes',
     'this skill in its own isolated context and returns only the conclusion — the',

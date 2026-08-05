@@ -93,6 +93,71 @@ const mixed = estimateTokens(sprinkled)
 check('sprinkled CJK is not classed cjk', mixed.kind !== 'cjk', true)
 check('sprinkled CJK bills per character', mixed.tokens - plain.tokens < 20, true)
 
+// --- window resolution ---
+// The percentage is only useful if its denominator is the room a skill actually
+// competes for. These assert the denominator, which is the bug the window
+// module exists to fix: a hardcoded 200k mis-reported every session whose real
+// budget differed.
+import { resolveWindow, usableBudget, modelCeiling } from '../hooks/window.mjs'
+
+const noEnv = () => {
+  for (const k of ['CLAUDE_CODE_MAX_CONTEXT_TOKENS', 'CLAUDE_CODE_AUTO_COMPACT_WINDOW', 'CLAUDE_CODE_DISABLE_1M_CONTEXT', 'CLAUDE_AUTOCOMPACT_PCT_OVERRIDE', 'CLAUDE_CODE_MAX_OUTPUT_TOKENS', 'ANTHROPIC_MODEL']) delete process.env[k]
+}
+
+noEnv()
+check('bare env falls back to base tier', resolveWindow(null), 200000)
+check('explicit config wins', resolveWindow(64000), 64000)
+check('zero config is not a window', resolveWindow(0), 200000)
+check('garbage config is ignored', resolveWindow('lots'), 200000)
+
+process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = '120000'
+check('CLI cap is honoured', resolveWindow(null), 120000)
+check('config outranks CLI cap', resolveWindow(50000), 50000)
+noEnv()
+
+process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = '150000'
+check('auto-compact window is honoured', resolveWindow(null), 150000)
+noEnv()
+
+// A 1M model must never be reported as 1M while Claude Code runs it at 200k —
+// measured live: claude-opus-5 (1M on the API) in a 200k auto-compact window.
+check('1M model clamps to base tier', resolveWindow(null, 'claude-opus-5'), 200000)
+process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = '1'
+check('1M model clamps with 1M disabled', resolveWindow(null, 'claude-opus-5'), 200000)
+noEnv()
+
+// Dated transcript ids must match the bare table keys and vice versa, or every
+// legacy session silently falls through to the default.
+check('dated id matches bare key', modelCeiling('claude-opus-5-20260101'), 1000000)
+check('bare id matches dated key', modelCeiling('claude-haiku-4-5'), 200000)
+check('unknown model has no ceiling', modelCeiling('claude-not-a-model'), null)
+check('empty model has no ceiling', modelCeiling(''), null)
+
+// The usable budget is the number the user cares about: nominal window less the
+// auto-compact buffer and whatever output is reserved.
+noEnv()
+check('usable budget discounts the compact buffer', usableBudget(200000), 167000)
+process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = '48000'
+check('reserved output is subtracted', usableBudget(200000), 119000)
+process.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = '60'
+check('pct override wins over the measured default', usableBudget(200000), 72000)
+noEnv()
+// A setup reserving more output than the window allows must not report negative.
+process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = '999999'
+check('over-reservation clamps at zero', usableBudget(200000), 0)
+noEnv()
+
+// The reason text must quote the usable budget, not the nominal window — the
+// whole point of the change.
+const budgetReason = reasonOf(run(skillCall('huge')))
+check('reason quotes usable context', /167k usable context/.test(budgetReason), true)
+check('reason names the nominal window', /200k window/.test(budgetReason), true)
+// An explicitly configured window is taken at face value, so the buffer
+// explanation would be a lie.
+const configuredReason = reasonOf(run(skillCall('huge'), { contextWindowSize: 100000 }))
+check('configured window omits buffer wording', /auto-compact buffer/.test(configuredReason), false)
+check('configured window is used as the basis', /84k usable context/.test(configuredReason), true)
+
 // --- logging: opting in must capture cheap skills too, not just expensive ones,
 // or the log is useless for choosing a threshold ---
 const logPath = join(sandbox, 'decisions.jsonl')
