@@ -137,7 +137,7 @@ The estimate is an upper bound, not a measurement, and the inflation is delibera
 npm test
 ```
 
-18 integration tests that drive the real hook binary with real payloads on stdin and assert on stdout — the contract under test is never mocked. Includes a timing loop so overhead regressions show up.
+21 integration tests that drive the real hook binary with real payloads on stdin and assert on stdout — the contract under test is never mocked. Includes a timing loop so overhead regressions show up.
 
 ## Portability
 

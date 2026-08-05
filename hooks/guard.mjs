@@ -97,7 +97,11 @@ function pct (tokens, window) {
   return window ? Math.round((tokens / window) * 100) : null
 }
 
-function reason (skill, tokens, config) {
+// The closing line differs by decision because the two decisions reach
+// different readers. An "ask" is rendered to the user with an Approve button;
+// a "deny" is returned to the model with no prompt and no way to consent, so
+// telling it to approve would send it chasing an affordance that isn't there.
+function reason (skill, tokens, config, decision) {
   const p = pct(tokens, config.contextWindowSize)
   const share = p === null ? '' : ` = ${p}% of your ${Math.round(config.contextWindowSize / 1000)}k window`
   return [
@@ -107,7 +111,9 @@ function reason (skill, tokens, config) {
     'this skill in its own isolated context and returns only the conclusion — the',
     'main window pays for the summary, not the whole SKILL.md.',
     '',
-    'Approve to load it inline anyway.',
+    decision === 'deny'
+      ? `Blocked outright by denyThreshold (${config.denyThreshold.toLocaleString()} tokens) — no permission prompt is shown, and this call cannot be retried into one. Delegate to a subagent, or raise or unset denyThreshold in your context-bloat-guard.json to permit inline loads this large.`
+      : 'Approve to load it inline anyway.',
   ].join('\n')
 }
 
@@ -167,7 +173,7 @@ function main (raw) {
   else if (tokens >= config.warnThreshold) decision = 'ask'
 
   log(config, { skill, bytes: found.size, tokens, kind, decision })
-  emit(decision, reason(skill, tokens, config))
+  emit(decision, reason(skill, tokens, config, decision))
 }
 
 let input = ''

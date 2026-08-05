@@ -41,6 +41,7 @@ function check (label, actual, expected) {
 
 const skillCall = name => ({ tool_name: 'Skill', tool_input: { skill: name }, cwd: sandbox })
 const decision = r => r?.hookSpecificOutput?.permissionDecision ?? 'allow'
+const reasonOf = r => r?.hookSpecificOutput?.permissionDecisionReason ?? ''
 
 // --- happy paths ---
 makeSkill('tiny', '# tiny\n' + 'short prose. '.repeat(20))
@@ -52,6 +53,14 @@ check('large skill asks', decision(run(skillCall('huge'))), 'ask')
 check('alwaysAllow bypasses', decision(run(skillCall('huge'), { alwaysAllow: ['huge'] })), 'allow')
 check('disabled bypasses', decision(run(skillCall('huge'), { enabled: false })), 'allow')
 check('deny when configured', decision(run(skillCall('huge'), { denyThreshold: 1000 })), 'deny')
+
+// A deny reaches the model with no prompt attached, so it must not claim an
+// Approve affordance that does not exist.
+const denyReason = reasonOf(run(skillCall('huge'), { denyThreshold: 1000 }))
+const askReason = reasonOf(run(skillCall('huge')))
+check('deny reason omits approve wording', /approve/i.test(denyReason), false)
+check('deny reason names the escape hatch', denyReason.includes('denyThreshold'), true)
+check('ask reason keeps approve wording', /approve/i.test(askReason), true)
 check('high threshold allows', decision(run(skillCall('huge'), { warnThreshold: 10_000_000 })), 'allow')
 
 // lowercase skill.md is used by real skills (brain, google, slack)
