@@ -178,7 +178,7 @@ const under = results.filter(r => r.error < 0)
 const worstOver = Math.max(...results.map(r => r.error))
 console.log(`\n${results.length} fixtures | under-estimates: ${under.length} | worst over-estimate: ${(worstOver * 100).toFixed(1)}%`)
 if (under.length) {
-  console.log('UNDER-ESTIMATED (must be zero before v1.0.0):')
+  console.log('UNDER-ESTIMATED (must be zero — see "Token estimation" in the README):')
   for (const r of under) console.log(`  ${r.label} ${(r.error * 100).toFixed(1)}%`)
 }
 process.exit(under.length ? 1 : 0)
