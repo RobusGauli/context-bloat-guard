@@ -18,7 +18,7 @@
 
 import { readFileSync, statSync, appendFileSync, realpathSync, readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join, resolve, sep } from 'node:path'
 
 import { estimateTokens, BYTES_PER_TOKEN_FLOOR } from './estimate.mjs'
 import { resolveWindow, usableBudget } from './window.mjs'
@@ -77,6 +77,21 @@ function safeReaddir (dir) {
 // Resolution order mirrors how Claude Code itself finds a skill. Both SKILL.md
 // and skill.md are checked: real skills in the wild use each, and a
 // case-sensitive filesystem will not forgive guessing.
+// The skill name arrives from the tool call and is interpolated into a path, so
+// a name like "../../../../etc" walked straight out of the skills directory.
+// Containment is checked LEXICALLY — resolve() collapses ".." before any
+// filesystem access, so an escaping candidate is rejected without touching disk.
+//
+// Deliberately lexical, not realpath-based: skill directories are commonly
+// symlinked out to a dotfiles repo, and comparing resolved paths would reject
+// that legitimate setup. The symlink target is the user's own choice; a
+// traversal sequence in a tool argument is not.
+function containedCandidate (base, ...segments) {
+  const root = resolve(base)
+  const candidate = resolve(join(root, ...segments))
+  return candidate === root || candidate.startsWith(root + sep) ? candidate : null
+}
+
 function resolveSkillFile (name, cwd) {
   const home = homedir()
   const roots = []
@@ -85,26 +100,32 @@ function resolveSkillFile (name, cwd) {
   // versioned cache dir. These are empirically the largest skills in the
   // ecosystem, so skipping them would miss the cases that matter most.
   if (name.includes(':')) {
-    const [pluginName, skillName] = name.split(':')
+    // Split on the FIRST colon only. `split(':')` destructured to two names, so
+    // an "a:b:c" name silently resolved as "a:b" and measured the wrong skill.
+    // Keeping the remainder intact means it simply fails to resolve instead.
+    const cut = name.indexOf(':')
+    const pluginName = name.slice(0, cut)
+    const skillName = name.slice(cut + 1)
     const cache = join(home, '.claude', 'plugins', 'cache')
     for (const marketplace of safeReaddir(cache)) {
       const pluginDir = join(cache, marketplace, pluginName)
       // One extra level: the installed version (e.g. "3.9.2").
       for (const version of safeReaddir(pluginDir)) {
-        roots.push(join(pluginDir, version, 'skills', skillName))
+        roots.push([join(pluginDir, version, 'skills'), skillName])
       }
     }
   }
 
-  roots.push(join(cwd, '.claude', 'skills', name))
-  roots.push(join(home, '.claude', 'skills', name))
+  roots.push([join(cwd, '.claude', 'skills'), name])
+  roots.push([join(home, '.claude', 'skills'), name])
   if (process.env.CLAUDE_PLUGIN_ROOT) {
-    roots.push(join(process.env.CLAUDE_PLUGIN_ROOT, 'skills', name))
+    roots.push([join(process.env.CLAUDE_PLUGIN_ROOT, 'skills'), name])
   }
 
-  for (const root of roots) {
+  for (const [base, skillDir] of roots) {
     for (const file of ['SKILL.md', 'skill.md']) {
-      const candidate = join(root, file)
+      const candidate = containedCandidate(base, skillDir, file)
+      if (!candidate) continue // escapes the skills root — not a skill we own
       try {
         // realpath resolves symlinked skill dirs (a common dotfiles pattern)
         // and closes the stat/read TOCTOU gap by pinning one inode.

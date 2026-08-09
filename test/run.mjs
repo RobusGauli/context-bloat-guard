@@ -3,7 +3,7 @@
 // payload on stdin, assert on stdout. No mocking of the contract under test.
 
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -22,12 +22,12 @@ function makeSkill (name, body, filename = 'SKILL.md') {
 }
 
 let configSeq = 0
-function run (payload, config) {
+function run (payload, config, env) {
   const configPath = join(sandbox, `config-${configSeq++}.json`)
   writeFileSync(configPath, JSON.stringify(config ?? {}))
   const out = execFileSync('node', [GUARD], {
     input: JSON.stringify(payload),
-    env: { ...process.env, CCG_CONFIG: configPath },
+    env: { ...process.env, CCG_CONFIG: configPath, ...env },
     encoding: 'utf8',
   })
   return out ? JSON.parse(out) : null
@@ -95,8 +95,40 @@ check('missing tool_input', decision(run({ tool_name: 'Skill', cwd: sandbox })),
 const empty = execFileSync('node', [GUARD], { input: 'not json at all', encoding: 'utf8' })
 check('malformed stdin exits clean', empty, '')
 
-// path traversal in the skill name must not escape into an arbitrary read
+// --- path traversal ---
+// The skill name is interpolated into a path, so it must not be able to walk out
+// of the skills root. The previous version of this test used "../../../../etc"
+// and passed only because /etc/SKILL.md does not happen to exist — it asserted
+// nothing. These plant a real, oversized SKILL.md at the traversal target, so a
+// guard that follows the escape returns 'ask' and fails the check.
+const bigBody = '# escaped\n' + 'the quick brown fox jumps over the lazy dog. '.repeat(6000)
+mkdirSync(join(sandbox, '.claude', 'outside'), { recursive: true })
+writeFileSync(join(sandbox, '.claude', 'outside', 'SKILL.md'), bigBody)
+check('traversal cannot reach a real file above the root', decision(run(skillCall('../outside'))), 'allow')
+
+mkdirSync(join(sandbox, 'elsewhere', 'deep'), { recursive: true })
+writeFileSync(join(sandbox, 'elsewhere', 'deep', 'SKILL.md'), bigBody)
+check('multi-segment traversal is rejected', decision(run(skillCall('../../elsewhere/deep'))), 'allow')
 check('traversal name is inert', decision(run(skillCall('../../../../etc'))), 'allow')
+
+// The containment check is lexical precisely so this keeps working: symlinking a
+// skill directory out to a dotfiles repo is a documented, legitimate pattern, and
+// a realpath-based check would have rejected it.
+mkdirSync(join(sandbox, 'dotfiles', 'linked'), { recursive: true })
+writeFileSync(join(sandbox, 'dotfiles', 'linked', 'SKILL.md'), bigBody)
+symlinkSync(join(sandbox, 'dotfiles', 'linked'), join(sandbox, '.claude', 'skills', 'linked'))
+check('symlinked skill dir still resolves', decision(run(skillCall('linked'))), 'ask')
+
+// Namespaced names split on the FIRST colon only. Destructuring `split(':')`
+// silently resolved "a:b:c" as plugin "a" skill "b" — measuring a different
+// skill than the one invoked. HOME is redirected so the plugin cache is a
+// fixture rather than the developer's real one.
+const fakeHome = join(sandbox, 'home')
+const cachedSkill = join(fakeHome, '.claude', 'plugins', 'cache', 'mkt', 'plug', '1.0.0', 'skills', 'b')
+mkdirSync(cachedSkill, { recursive: true })
+writeFileSync(join(cachedSkill, 'SKILL.md'), bigBody)
+check('two-segment plugin skill resolves', decision(run(skillCall('plug:b'), {}, { HOME: fakeHome })), 'ask')
+check('three-segment name does not resolve to its prefix', decision(run(skillCall('plug:b:c'), {}, { HOME: fakeHome })), 'allow')
 
 // --- estimator sanity: CJK must not be scored as if it were ASCII prose ---
 makeSkill('cjk', '# 中文\n' + '这是一个很长的中文文档需要很多标记。'.repeat(900))
