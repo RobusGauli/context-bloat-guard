@@ -18,7 +18,7 @@
 
 import { readFileSync, statSync, appendFileSync, realpathSync, readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join, resolve, sep } from 'node:path'
 
 import { estimateTokens, BYTES_PER_TOKEN_FLOOR } from './estimate.mjs'
 import { resolveWindow, usableBudget } from './window.mjs'
@@ -32,10 +32,33 @@ const DEFAULTS = {
   logPath: null,            // opt-in
 }
 
+// A hand-edited JSON file can hold anything, and every value here ends up in a
+// comparison or a path. Untyped values did not fail loudly — they failed
+// absurdly: `warnThreshold: null` coerces `tokens >= null` to `tokens >= 0`,
+// which is always true, so the one setting a user reaches for to quiet the guard
+// made it prompt on every single skill. Wrong-typed values fall back to the
+// default rather than flowing through.
+//
+// null is meaningful, not merely absent: for the two thresholds it means OFF,
+// matching denyThreshold's documented default.
+function sanitizeConfig (raw) {
+  const out = { ...DEFAULTS }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out
+
+  if (typeof raw.enabled === 'boolean') out.enabled = raw.enabled
+  for (const key of ['warnThreshold', 'denyThreshold', 'contextWindowSize']) {
+    if (raw[key] === null) out[key] = null
+    else if (typeof raw[key] === 'number' && Number.isFinite(raw[key]) && raw[key] > 0) out[key] = raw[key]
+  }
+  if (Array.isArray(raw.alwaysAllow)) out.alwaysAllow = raw.alwaysAllow.filter(n => typeof n === 'string')
+  if (raw.logPath === null || typeof raw.logPath === 'string') out.logPath = raw.logPath
+  return out
+}
+
 function loadConfig () {
   const path = process.env.CCG_CONFIG || join(homedir(), '.claude', 'context-bloat-guard.json')
   try {
-    return { ...DEFAULTS, ...JSON.parse(readFileSync(path, 'utf8')) }
+    return sanitizeConfig(JSON.parse(readFileSync(path, 'utf8')))
   } catch {
     return DEFAULTS // missing or corrupt config is not an error
   }
@@ -51,9 +74,31 @@ function safeReaddir (dir) {
   }
 }
 
+// Newest version first. Numeric-aware, because a plain string sort orders these
+// by character: "9.0.0" would beat "10.0.0" for the same reason "b" beats "a",
+// which turns an arbitrary wrong answer into a consistently wrong one.
+function byVersionDesc (a, b) {
+  return b.localeCompare(a, undefined, { numeric: true })
+}
+
 // Resolution order mirrors how Claude Code itself finds a skill. Both SKILL.md
 // and skill.md are checked: real skills in the wild use each, and a
 // case-sensitive filesystem will not forgive guessing.
+// The skill name arrives from the tool call and is interpolated into a path, so
+// a name like "../../../../etc" walked straight out of the skills directory.
+// Containment is checked LEXICALLY — resolve() collapses ".." before any
+// filesystem access, so an escaping candidate is rejected without touching disk.
+//
+// Deliberately lexical, not realpath-based: skill directories are commonly
+// symlinked out to a dotfiles repo, and comparing resolved paths would reject
+// that legitimate setup. The symlink target is the user's own choice; a
+// traversal sequence in a tool argument is not.
+function containedCandidate (base, ...segments) {
+  const root = resolve(base)
+  const candidate = resolve(join(root, ...segments))
+  return candidate === root || candidate.startsWith(root + sep) ? candidate : null
+}
+
 function resolveSkillFile (name, cwd) {
   const home = homedir()
   const roots = []
@@ -62,26 +107,35 @@ function resolveSkillFile (name, cwd) {
   // versioned cache dir. These are empirically the largest skills in the
   // ecosystem, so skipping them would miss the cases that matter most.
   if (name.includes(':')) {
-    const [pluginName, skillName] = name.split(':')
+    // Split on the FIRST colon only. `split(':')` destructured to two names, so
+    // an "a:b:c" name silently resolved as "a:b" and measured the wrong skill.
+    // Keeping the remainder intact means it simply fails to resolve instead.
+    const cut = name.indexOf(':')
+    const pluginName = name.slice(0, cut)
+    const skillName = name.slice(cut + 1)
     const cache = join(home, '.claude', 'plugins', 'cache')
     for (const marketplace of safeReaddir(cache)) {
       const pluginDir = join(cache, marketplace, pluginName)
-      // One extra level: the installed version (e.g. "3.9.2").
-      for (const version of safeReaddir(pluginDir)) {
-        roots.push(join(pluginDir, version, 'skills', skillName))
+      // One extra level: the installed version (e.g. "3.9.2"). With more than one
+      // version installed the first hit wins, so the order has to be meaningful —
+      // readdir order is whatever the filesystem returns, which would measure an
+      // arbitrary version of a skill Claude Code is loading a specific one of.
+      for (const version of safeReaddir(pluginDir).sort(byVersionDesc)) {
+        roots.push([join(pluginDir, version, 'skills'), skillName])
       }
     }
   }
 
-  roots.push(join(cwd, '.claude', 'skills', name))
-  roots.push(join(home, '.claude', 'skills', name))
+  roots.push([join(cwd, '.claude', 'skills'), name])
+  roots.push([join(home, '.claude', 'skills'), name])
   if (process.env.CLAUDE_PLUGIN_ROOT) {
-    roots.push(join(process.env.CLAUDE_PLUGIN_ROOT, 'skills', name))
+    roots.push([join(process.env.CLAUDE_PLUGIN_ROOT, 'skills'), name])
   }
 
-  for (const root of roots) {
+  for (const [base, skillDir] of roots) {
     for (const file of ['SKILL.md', 'skill.md']) {
-      const candidate = join(root, file)
+      const candidate = containedCandidate(base, skillDir, file)
+      if (!candidate) continue // escapes the skills root — not a skill we own
       try {
         // realpath resolves symlinked skill dirs (a common dotfiles pattern)
         // and closes the stat/read TOCTOU gap by pinning one inode.
@@ -182,19 +236,29 @@ function main (raw) {
   // Skipped when logging is on: someone who set logPath asked to observe every
   // invocation, including the cheap ones they are trying to calibrate against.
   // They pay one small read for that.
+  // The fast path must clear the LOWEST threshold that can still fire, not
+  // warnThreshold specifically. Two reasons: warnThreshold may be null (off)
+  // while denyThreshold is set, and a denyThreshold below warnThreshold would
+  // otherwise let the guard skip a file it was configured to block outright.
+  const active = [config.warnThreshold, config.denyThreshold].filter(t => t !== null)
+  if (!active.length && !config.logPath) return // nothing can fire and nothing to record
+
   // The ceil is load-bearing, not cosmetic: estimateTokens ends in Math.ceil, so
   // for a pure-ASCII file the exact quotient can sit a fraction below the real
   // token count. Rounding the bound up restores the strict inequality.
-  if (!config.logPath && Math.ceil(found.size / BYTES_PER_TOKEN_FLOOR) < config.warnThreshold) return
+  if (!config.logPath && Math.ceil(found.size / BYTES_PER_TOKEN_FLOOR) < Math.min(...active)) return
 
   const text = readFileSync(found.path, 'utf8')
   const { tokens, kind } = estimateTokens(text)
 
   let decision = 'allow'
   if (config.denyThreshold !== null && tokens >= config.denyThreshold) decision = 'deny'
-  else if (tokens >= config.warnThreshold) decision = 'ask'
+  else if (config.warnThreshold !== null && tokens >= config.warnThreshold) decision = 'ask'
 
-  log(config, { skill, bytes: found.size, tokens, kind, decision })
+  // ts first so a tail of the log reads chronologically. The log exists to pick a
+  // threshold from real usage, which means slicing it by session or by date —
+  // impossible without a time field.
+  log(config, { ts: new Date().toISOString(), skill, bytes: found.size, tokens, kind, decision })
   emit(decision, reason(skill, tokens, config, decision))
 }
 

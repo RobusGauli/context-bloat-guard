@@ -3,12 +3,12 @@
 // payload on stdin, assert on stdout. No mocking of the contract under test.
 
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { estimateTokens, BYTES_PER_TOKEN_FLOOR } from '../hooks/estimate.mjs'
+import { estimateTokens, scriptCounts, BYTES_PER_TOKEN_FLOOR } from '../hooks/estimate.mjs'
 
 const GUARD = join(dirname(fileURLToPath(import.meta.url)), '..', 'hooks', 'guard.mjs')
 const sandbox = mkdtempSync(join(tmpdir(), 'ccg-'))
@@ -22,12 +22,12 @@ function makeSkill (name, body, filename = 'SKILL.md') {
 }
 
 let configSeq = 0
-function run (payload, config) {
+function run (payload, config, env) {
   const configPath = join(sandbox, `config-${configSeq++}.json`)
   writeFileSync(configPath, JSON.stringify(config ?? {}))
   const out = execFileSync('node', [GUARD], {
     input: JSON.stringify(payload),
-    env: { ...process.env, CCG_CONFIG: configPath },
+    env: { ...process.env, CCG_CONFIG: configPath, ...env },
     encoding: 'utf8',
   })
   return out ? JSON.parse(out) : null
@@ -63,6 +63,26 @@ check('deny reason names the escape hatch', denyReason.includes('denyThreshold')
 check('ask reason keeps approve wording', /approve/i.test(askReason), true)
 check('high threshold allows', decision(run(skillCall('huge'), { warnThreshold: 10_000_000 })), 'allow')
 
+// --- config validation ---
+// null means OFF for a threshold. Before sanitizeConfig, `tokens >= null`
+// coerced to `tokens >= 0` and prompted on EVERY skill — the exact opposite of
+// what someone setting null is asking for.
+check('warnThreshold null silences the warning', decision(run(skillCall('huge'), { warnThreshold: null })), 'allow')
+check('warnThreshold null still allows tiny skills', decision(run(skillCall('tiny'), { warnThreshold: null })), 'allow')
+// ...but an explicit denyThreshold must still fire with warnThreshold off, and
+// the fast path has to clear that lower bar rather than the absent one.
+check('warnThreshold null keeps denyThreshold live', decision(run(skillCall('huge'), { warnThreshold: null, denyThreshold: 1000 })), 'deny')
+// A denyThreshold below warnThreshold must not be skipped by the fast path.
+check('deny below warn is not skipped', decision(run(skillCall('huge'), { warnThreshold: 10_000_000, denyThreshold: 1000 })), 'deny')
+
+// Wrong-typed values fall back to the default instead of reaching a comparison.
+check('string threshold falls back to default', decision(run(skillCall('huge'), { warnThreshold: 'lots' })), 'ask')
+check('negative threshold falls back to default', decision(run(skillCall('tiny'), { warnThreshold: -1 })), 'allow')
+check('object threshold falls back to default', decision(run(skillCall('huge'), { warnThreshold: {} })), 'ask')
+check('string enabled falls back to default', decision(run(skillCall('huge'), { enabled: 'false' })), 'ask')
+check('non-array alwaysAllow is ignored', decision(run(skillCall('huge'), { alwaysAllow: 'huge' })), 'ask')
+check('non-string config is ignored wholesale', decision(run(skillCall('huge'), [1, 2, 3])), 'ask')
+
 // lowercase skill.md is used by real skills (brain, google, slack)
 makeSkill('lower', '# lower\n' + 'prose here. '.repeat(6000), 'skill.md')
 check('lowercase skill.md resolves', decision(run(skillCall('lower'))), 'ask')
@@ -75,8 +95,60 @@ check('missing tool_input', decision(run({ tool_name: 'Skill', cwd: sandbox })),
 const empty = execFileSync('node', [GUARD], { input: 'not json at all', encoding: 'utf8' })
 check('malformed stdin exits clean', empty, '')
 
-// path traversal in the skill name must not escape into an arbitrary read
+// --- path traversal ---
+// The skill name is interpolated into a path, so it must not be able to walk out
+// of the skills root. The previous version of this test used "../../../../etc"
+// and passed only because /etc/SKILL.md does not happen to exist — it asserted
+// nothing. These plant a real, oversized SKILL.md at the traversal target, so a
+// guard that follows the escape returns 'ask' and fails the check.
+const bigBody = '# escaped\n' + 'the quick brown fox jumps over the lazy dog. '.repeat(6000)
+mkdirSync(join(sandbox, '.claude', 'outside'), { recursive: true })
+writeFileSync(join(sandbox, '.claude', 'outside', 'SKILL.md'), bigBody)
+check('traversal cannot reach a real file above the root', decision(run(skillCall('../outside'))), 'allow')
+
+mkdirSync(join(sandbox, 'elsewhere', 'deep'), { recursive: true })
+writeFileSync(join(sandbox, 'elsewhere', 'deep', 'SKILL.md'), bigBody)
+check('multi-segment traversal is rejected', decision(run(skillCall('../../elsewhere/deep'))), 'allow')
 check('traversal name is inert', decision(run(skillCall('../../../../etc'))), 'allow')
+
+// The containment check is lexical precisely so this keeps working: symlinking a
+// skill directory out to a dotfiles repo is a documented, legitimate pattern, and
+// a realpath-based check would have rejected it.
+mkdirSync(join(sandbox, 'dotfiles', 'linked'), { recursive: true })
+writeFileSync(join(sandbox, 'dotfiles', 'linked', 'SKILL.md'), bigBody)
+symlinkSync(join(sandbox, 'dotfiles', 'linked'), join(sandbox, '.claude', 'skills', 'linked'))
+check('symlinked skill dir still resolves', decision(run(skillCall('linked'))), 'ask')
+
+// Namespaced names split on the FIRST colon only. Destructuring `split(':')`
+// silently resolved "a:b:c" as plugin "a" skill "b" — measuring a different
+// skill than the one invoked. HOME is redirected so the plugin cache is a
+// fixture rather than the developer's real one.
+const fakeHome = join(sandbox, 'home')
+const cachedSkill = join(fakeHome, '.claude', 'plugins', 'cache', 'mkt', 'plug', '1.0.0', 'skills', 'b')
+mkdirSync(cachedSkill, { recursive: true })
+writeFileSync(join(cachedSkill, 'SKILL.md'), bigBody)
+check('two-segment plugin skill resolves', decision(run(skillCall('plug:b'), {}, { HOME: fakeHome })), 'ask')
+check('three-segment name does not resolve to its prefix', decision(run(skillCall('plug:b:c'), {}, { HOME: fakeHome })), 'allow')
+
+// With several versions of a plugin installed, the first hit wins — so the order
+// must be meaningful rather than whatever readdir returns. These two cases pin
+// both halves: newest wins, and "newest" is compared numerically.
+const tinyBody = '# tiny\n' + 'short prose. '.repeat(20)
+function makeVersioned (homeDir, versions) {
+  for (const [version, body] of Object.entries(versions)) {
+    const dir = join(homeDir, '.claude', 'plugins', 'cache', 'mkt', 'plug', version, 'skills', 'b')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'SKILL.md'), body)
+  }
+  return homeDir
+}
+// 2.0.0 is huge, 10.0.0 is tiny. A plain string sort picks "2.0.0" (character
+// order: "2" > "1") and would answer 'ask'; numeric order picks 10.0.0.
+const numericHome = makeVersioned(join(sandbox, 'home-numeric'), { '2.0.0': bigBody, '10.0.0': tinyBody })
+check('double-digit version beats single-digit', decision(run(skillCall('plug:b'), {}, { HOME: numericHome })), 'allow')
+// Reversed payloads, so a rule of "always pick the smaller file" cannot pass both.
+const newestHome = makeVersioned(join(sandbox, 'home-newest'), { '1.0.0': tinyBody, '2.0.0': bigBody })
+check('newest version is the one measured', decision(run(skillCall('plug:b'), {}, { HOME: newestHome })), 'ask')
 
 // --- estimator sanity: CJK must not be scored as if it were ASCII prose ---
 makeSkill('cjk', '# 中文\n' + '这是一个很长的中文文档需要很多标记。'.repeat(900))
@@ -92,6 +164,20 @@ const plain = estimateTokens(english)
 const mixed = estimateTokens(sprinkled)
 check('sprinkled CJK is not classed cjk', mixed.kind !== 'cjk', true)
 check('sprinkled CJK bills per character', mixed.tokens - plain.tokens < 20, true)
+
+// Astral-plane Han (CJK Ext B and later) must be billed at the Han rate, not as
+// English prose. Covering only the BMP left these in the non-CJK remainder at
+// RATIO.prose: 100 characters estimated 43 tokens against ~112 real, which is
+// under-counting — the failure mode the estimator exists to avoid.
+const astralHan = '\u{20000}\u{2A700}\u{2F800}'.repeat(40)
+const bmpHan = '中'.repeat(120)
+check('astral Han is classed cjk', estimateTokens(astralHan).kind, 'cjk')
+check('astral Han counts as Han characters', scriptCounts(astralHan).han, 120)
+check('astral Han prices like BMP Han', estimateTokens(astralHan).tokens, estimateTokens(bmpHan).tokens)
+// Ext G/H sit above the Ext B–F block and need their own range.
+check('CJK Ext G is classed cjk', estimateTokens('\u{30000}'.repeat(100)).kind, 'cjk')
+// The u flag must not change how BMP text is counted.
+check('BMP Han unchanged by the u flag', estimateTokens(bmpHan).tokens, 135)
 
 // --- the stat-only fast path must never skip a file that would warn ---
 // Regression: an ASCII markdown table is the densest input there is (1 byte per
@@ -124,6 +210,7 @@ const FLOOR_FIXTURES = {
   'cyrillic': 'это документ навыка для окна контекста ',
   'mixed 50/50': '| aaa | bbb |\n技能文件大小直接影响\n',
   'mixed 10/90': '| a |\n技能文件大小直接影响上下文窗口占用程度不可忽视\n',
+  'astral han': '\u{20000}\u{2A700}\u{2F800}',
 }
 let floorViolations = 0
 for (const [label, unit] of Object.entries(FLOOR_FIXTURES)) {
@@ -216,6 +303,10 @@ const logged = readFileSync(logPath, 'utf8').trim().split('\n').map(JSON.parse)
 check('log captures below-threshold skill', logged[0]?.skill, 'tiny')
 check('below-threshold skill still allowed', logged[0]?.decision, 'allow')
 check('log captures above-threshold skill', logged[1]?.decision, 'ask')
+// Without a time field the log cannot be sliced by session or date, which is the
+// only thing it is for.
+check('log records carry a timestamp', typeof logged[0]?.ts, 'string')
+check('timestamp is a valid ISO instant', new Date(logged[0]?.ts).toISOString(), logged[0]?.ts)
 
 // --- overhead ---
 const t0 = process.hrtime.bigint()

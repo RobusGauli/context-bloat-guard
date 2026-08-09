@@ -70,11 +70,21 @@ export const BYTES_PER_TOKEN_FLOOR = Math.min(
 //
 // Han ideographs, CJK punctuation, and full-width forms. Punctuation and
 // full-width forms appear in all three scripts and tokenize near the Han rate.
-const HAN = /[\u3000-\u303F\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\uFF00-\uFF65\uFF9E-\uFFEF]/g
+//
+// The astral ranges are not optional. Covering only the BMP left CJK Extension B
+// and later (U+20000+) outside all three classes, so they fell into the non-CJK
+// remainder and were priced at RATIO.prose: 100 such characters estimated 43
+// tokens against ~112 real. Under-counting is the one failure mode this
+// estimator exists to avoid, so the classes must span every assigned Han block.
+//
+// The `u` flag is required for the astral ranges to mean code points rather than
+// surrogate halves, and is applied to all three so `[...text].length` and the
+// match counts agree on what one character is.
+const HAN = /[\u3000-\u303F\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\uFF00-\uFF65\uFF9E-\uFFEF\u{20000}-\u{2FA1F}\u{30000}-\u{323AF}]/gu
 // Hiragana, katakana, katakana phonetic extensions, half-width katakana.
-const KANA = /[\u3040-\u30FF\u31F0-\u31FF\uFF66-\uFF9D]/g
+const KANA = /[\u3040-\u30FF\u31F0-\u31FF\uFF66-\uFF9D]/gu
 // Conjoining jamo, compatibility jamo, precomposed syllables.
-const HANGUL = /[\u1100-\u11FF\u3130-\u318F\uAC00-\uD7AF]/g
+const HANGUL = /[\u1100-\u11FF\u3130-\u318F\uAC00-\uD7AF]/gu
 
 // A file is *labelled* cjk only when CJK is the bulk of it. The label drives
 // reporting and per-class calibration, never the arithmetic — see below.

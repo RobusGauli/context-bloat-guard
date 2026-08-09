@@ -83,13 +83,15 @@ Optional. `~/.claude/context-bloat-guard.json`, all keys optional:
 | Key | Default | Meaning |
 |---|---|---|
 | `enabled` | `true` | Master off switch. |
-| `warnThreshold` | `15000` | Tokens at or above which you get asked. ~9% of a 200k window's usable budget. |
+| `warnThreshold` | `15000` | Tokens at or above which you get asked. ~9% of a 200k window's usable budget. Set `null` to turn the prompt off entirely — a `denyThreshold`, if set, still applies. |
 | `denyThreshold` | `null` | Tokens at or above which the load is refused outright. Off by default — see below. |
 | `contextWindowSize` | `null` | Only used to express the cost as a percentage. `null` detects it from the environment — see below. Set a number to override, and it is used verbatim with no buffer deducted. |
 | `alwaysAllow` | `[]` | Skill names to never prompt on. Use the invoked name, including any `plugin:skill` prefix. |
 | `logPath` | `null` | Opt-in JSONL of every skill invocation, for tuning your own threshold. `~` is expanded. Setting it disables the stat-only fast path — cheap skills get read and recorded too, otherwise the log couldn't tell you where your threshold belongs. |
 
-A missing or corrupt config file is not an error — defaults apply.
+A missing or corrupt config file is not an error — defaults apply. So is an
+individual value of the wrong type: a threshold set to a string, a negative
+number, or an object falls back to its default rather than reaching a comparison.
 
 Set `CCG_CONFIG` to point at a different config path (used by the test suite).
 
