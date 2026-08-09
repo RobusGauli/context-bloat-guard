@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { estimateTokens } from '../hooks/estimate.mjs'
+import { estimateTokens, BYTES_PER_TOKEN_FLOOR } from '../hooks/estimate.mjs'
 
 const GUARD = join(dirname(fileURLToPath(import.meta.url)), '..', 'hooks', 'guard.mjs')
 const sandbox = mkdtempSync(join(tmpdir(), 'ccg-'))
@@ -92,6 +92,55 @@ const plain = estimateTokens(english)
 const mixed = estimateTokens(sprinkled)
 check('sprinkled CJK is not classed cjk', mixed.kind !== 'cjk', true)
 check('sprinkled CJK bills per character', mixed.tokens - plain.tokens < 20, true)
+
+// --- the stat-only fast path must never skip a file that would warn ---
+// Regression: an ASCII markdown table is the densest input there is (1 byte per
+// character at the table divisor). A floor derived from CJK alone bounded this
+// 33 KB file at 14,740 tokens, under the 15,000 default, so it was never read
+// and never warned about — while its real cost is ~15,700.
+let tableBody = ''
+while (Buffer.byteLength(tableBody) < 33000) tableBody += '| aaa | bbb | ccc |\n'
+makeSkill('dense-table', tableBody)
+// Guard the fixture itself: the regression only exercises the fast path while
+// the file sits in the dead band — big enough to cross the threshold, small
+// enough that the old floor bounded it under.
+const denseTokens = estimateTokens(tableBody).tokens
+check('table fixture crosses the default threshold', denseTokens >= 15000, true)
+check('table fixture was skipped by the old floor', Buffer.byteLength(tableBody) / (3 / 1.34) < 15000, true)
+check('dense ASCII table asks', decision(run(skillCall('dense-table'))), 'ask')
+
+// The invariant the fast path rests on, asserted directly rather than inferred
+// from any single fixture: for every input, the byte bound must be at least the
+// real estimate. The ceil mirrors guard.mjs — estimateTokens ends in Math.ceil,
+// so the raw quotient can sit a fraction low on pure-ASCII input.
+const FLOOR_FIXTURES = {
+  'ascii table': '| aaa | bbb | ccc |\n',
+  'ascii code': '```js\nconst x = foo(bar, baz);\n```\n',
+  'ascii prose': 'the guard measures a skill before it enters the window. ',
+  'hangul': '이것은한국어문서입니다스킬파일은',
+  'hangul spaced': '이것은 한국어 문서입니다 스킬 파일은 ',
+  'han': '技能文件大小直接影响上下文窗口',
+  'kana': 'これはにほんごのぶんしょうです',
+  'cyrillic': 'это документ навыка для окна контекста ',
+  'mixed 50/50': '| aaa | bbb |\n技能文件大小直接影响\n',
+  'mixed 10/90': '| a |\n技能文件大小直接影响上下文窗口占用程度不可忽视\n',
+}
+let floorViolations = 0
+for (const [label, unit] of Object.entries(FLOOR_FIXTURES)) {
+  // Sweep sizes: the ceil correction only shows up at particular remainders, so
+  // a single length can pass while a neighbouring one fails.
+  for (const target of [1000, 8000, 33000, 120000]) {
+    let text = ''
+    while (Buffer.byteLength(text) < target) text += unit
+    const bound = Math.ceil(Buffer.byteLength(text) / BYTES_PER_TOKEN_FLOOR)
+    const { tokens } = estimateTokens(text)
+    if (bound < tokens) {
+      floorViolations++
+      console.log(`      floor under-bounds ${label} @${target}B: bound ${bound} < tokens ${tokens}`)
+    }
+  }
+}
+check('byte bound is never below the real estimate', floorViolations, 0)
 
 // --- window resolution ---
 // The percentage is only useful if its denominator is the room a skill actually

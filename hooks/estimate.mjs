@@ -33,9 +33,33 @@ export const CJK_TOKENS_PER_CHAR = {
   hangul: 1.34,
 }
 
-// Upper bound on tokens for any UTF-8 input: worst realistic case is the densest
-// script above at 3 bytes/char. Used to skip reading the file at all.
-export const BYTES_PER_TOKEN_FLOOR = 3 / Math.max(...Object.values(CJK_TOKENS_PER_CHAR))
+// Fewest bytes any single token can be made of, across every population priced
+// above. Dividing a file's byte size by this bounds its token count from above,
+// which is what lets the guard skip reading small files entirely.
+//
+// Must be the MINIMUM over ALL populations, not just the CJK ones. Deriving it
+// from CJK alone gave 3/1.34 = 2.239, but ASCII is denser: 1 byte/char at the
+// table divisor is 2.10 bytes/token. Files between the two rates were declared
+// unable to reach the threshold and never measured — a silent dead band sitting
+// directly above every warnThreshold. CJK characters cost more tokens each, but
+// they also cost 3x the bytes, and the bytes win.
+//
+// Keeping both terms makes this self-maintaining: recalibrating RATIO or
+// CJK_TOKENS_PER_CHAR flows straight through, so neither can silently invalidate
+// the floor again. The CJK term is not the binding one today — it only becomes
+// so if a CJK rate is ever recalibrated above 3/2.10 = 1.43.
+//
+// The bound holds for mixed-script files because the estimator prices each
+// population separately and sums them: if every population needs at least this
+// many bytes per token, so does any mixture of them.
+//
+// NOTE: estimateTokens ends in Math.ceil, so a pure-ASCII file can land up to
+// one token above size/FLOOR. Callers must ceil the bound before comparing —
+// ceil(bound) >= ceil(exact) = tokens holds unconditionally.
+export const BYTES_PER_TOKEN_FLOOR = Math.min(
+  ...Object.values(RATIO),
+  3 / Math.max(...Object.values(CJK_TOKENS_PER_CHAR)),
+)
 
 // Written as \u escapes, not literal characters: a literal class is unreadable
 // in a diff and silently mis-orders (an early draft threw "Range out of order").
