@@ -182,7 +182,10 @@ function main (raw) {
   // Skipped when logging is on: someone who set logPath asked to observe every
   // invocation, including the cheap ones they are trying to calibrate against.
   // They pay one small read for that.
-  if (!config.logPath && found.size / BYTES_PER_TOKEN_FLOOR < config.warnThreshold) return
+  // The ceil is load-bearing, not cosmetic: estimateTokens ends in Math.ceil, so
+  // for a pure-ASCII file the exact quotient can sit a fraction below the real
+  // token count. Rounding the bound up restores the strict inequality.
+  if (!config.logPath && Math.ceil(found.size / BYTES_PER_TOKEN_FLOOR) < config.warnThreshold) return
 
   const text = readFileSync(found.path, 'utf8')
   const { tokens, kind } = estimateTokens(text)

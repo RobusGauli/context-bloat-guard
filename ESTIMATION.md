@@ -69,11 +69,42 @@ twice. The full-width block `U+FF00–FFEF` contains half-width katakana at
 ### The fast path
 
 Most skills are small and cannot possibly cross the threshold. For those the
-guard never reads the file: one `stat()`, and if `size / 2.069` is still below
-the threshold it returns silently. 2.069 bytes/token is the densest realistic
-case — 3-byte UTF-8 characters at the worst per-character rate above. It is a
-floor, so it can only over-state a file's ceiling, never let an expensive one
-through.
+guard never reads the file: one `stat()`, and if `ceil(size / 2.10)` is still
+below the threshold it returns silently. It is a floor, so it can only over-state
+a file's ceiling, never let an expensive one through.
+
+2.10 bytes/token is the densest input the estimator can be handed, and it is
+**ASCII, not CJK** — the minimum over every population priced above:
+
+| Population | bytes/char | tokens/char | bytes/token |
+|---|---|---|---|
+| ASCII table | 1 | 1 / 2.10 | **2.10** |
+| ASCII code | 1 | 1 / 2.16 | 2.16 |
+| ASCII prose | 1 | 1 / 2.33 | 2.33 |
+| Hangul (worst CJK) | 3 | 1.34 | 2.239 |
+| Han | 3 | 1.12 | 2.679 |
+| Kana | 3 | 0.97 | 3.093 |
+
+CJK characters cost more tokens each, but they also cost three times the bytes,
+and the bytes win. Deriving the floor from the CJK rates alone gave 2.239, which
+is not a floor at all: a 33 KB ASCII table bounds to 14,740 tokens under it while
+really costing 15,715, so it was declared unable to reach the default threshold
+and never measured. That dead band ran from `warnThreshold` to roughly
+`warnThreshold × 1.066` — sitting directly above every configured threshold.
+
+The floor is computed from `RATIO` and `CJK_TOKENS_PER_CHAR` rather than written
+down, so recalibrating either flows straight through and neither can silently
+invalidate it again. The CJK term is not the binding one today; it becomes so
+only if a CJK rate is ever recalibrated above `3 / 2.10 = 1.43`.
+
+The bound holds for mixed-script files because the estimator prices each
+population separately and sums them: if every population needs at least 2.10
+bytes per token, so does any mixture.
+
+The `ceil` is load-bearing. `estimateTokens` ends in `Math.ceil`, so a pure-ASCII
+file can land up to one token above the raw quotient — a 33,000-byte table bounds
+to 15,714.28 against a real 15,715. Rounding the bound up restores the strict
+inequality, since `ceil(bound) >= ceil(exact) = tokens` unconditionally.
 
 Setting `logPath` disables this fast path deliberately. A log that omits cheap
 skills cannot tell you where your threshold belongs.
