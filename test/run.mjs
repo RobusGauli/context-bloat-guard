@@ -130,6 +130,26 @@ writeFileSync(join(cachedSkill, 'SKILL.md'), bigBody)
 check('two-segment plugin skill resolves', decision(run(skillCall('plug:b'), {}, { HOME: fakeHome })), 'ask')
 check('three-segment name does not resolve to its prefix', decision(run(skillCall('plug:b:c'), {}, { HOME: fakeHome })), 'allow')
 
+// With several versions of a plugin installed, the first hit wins — so the order
+// must be meaningful rather than whatever readdir returns. These two cases pin
+// both halves: newest wins, and "newest" is compared numerically.
+const tinyBody = '# tiny\n' + 'short prose. '.repeat(20)
+function makeVersioned (homeDir, versions) {
+  for (const [version, body] of Object.entries(versions)) {
+    const dir = join(homeDir, '.claude', 'plugins', 'cache', 'mkt', 'plug', version, 'skills', 'b')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'SKILL.md'), body)
+  }
+  return homeDir
+}
+// 2.0.0 is huge, 10.0.0 is tiny. A plain string sort picks "2.0.0" (character
+// order: "2" > "1") and would answer 'ask'; numeric order picks 10.0.0.
+const numericHome = makeVersioned(join(sandbox, 'home-numeric'), { '2.0.0': bigBody, '10.0.0': tinyBody })
+check('double-digit version beats single-digit', decision(run(skillCall('plug:b'), {}, { HOME: numericHome })), 'allow')
+// Reversed payloads, so a rule of "always pick the smaller file" cannot pass both.
+const newestHome = makeVersioned(join(sandbox, 'home-newest'), { '1.0.0': tinyBody, '2.0.0': bigBody })
+check('newest version is the one measured', decision(run(skillCall('plug:b'), {}, { HOME: newestHome })), 'ask')
+
 // --- estimator sanity: CJK must not be scored as if it were ASCII prose ---
 makeSkill('cjk', '# 中文\n' + '这是一个很长的中文文档需要很多标记。'.repeat(900))
 check('CJK skill asks', decision(run(skillCall('cjk'))), 'ask')
@@ -283,6 +303,10 @@ const logged = readFileSync(logPath, 'utf8').trim().split('\n').map(JSON.parse)
 check('log captures below-threshold skill', logged[0]?.skill, 'tiny')
 check('below-threshold skill still allowed', logged[0]?.decision, 'allow')
 check('log captures above-threshold skill', logged[1]?.decision, 'ask')
+// Without a time field the log cannot be sliced by session or date, which is the
+// only thing it is for.
+check('log records carry a timestamp', typeof logged[0]?.ts, 'string')
+check('timestamp is a valid ISO instant', new Date(logged[0]?.ts).toISOString(), logged[0]?.ts)
 
 // --- overhead ---
 const t0 = process.hrtime.bigint()

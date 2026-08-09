@@ -74,6 +74,13 @@ function safeReaddir (dir) {
   }
 }
 
+// Newest version first. Numeric-aware, because a plain string sort orders these
+// by character: "9.0.0" would beat "10.0.0" for the same reason "b" beats "a",
+// which turns an arbitrary wrong answer into a consistently wrong one.
+function byVersionDesc (a, b) {
+  return b.localeCompare(a, undefined, { numeric: true })
+}
+
 // Resolution order mirrors how Claude Code itself finds a skill. Both SKILL.md
 // and skill.md are checked: real skills in the wild use each, and a
 // case-sensitive filesystem will not forgive guessing.
@@ -109,8 +116,11 @@ function resolveSkillFile (name, cwd) {
     const cache = join(home, '.claude', 'plugins', 'cache')
     for (const marketplace of safeReaddir(cache)) {
       const pluginDir = join(cache, marketplace, pluginName)
-      // One extra level: the installed version (e.g. "3.9.2").
-      for (const version of safeReaddir(pluginDir)) {
+      // One extra level: the installed version (e.g. "3.9.2"). With more than one
+      // version installed the first hit wins, so the order has to be meaningful —
+      // readdir order is whatever the filesystem returns, which would measure an
+      // arbitrary version of a skill Claude Code is loading a specific one of.
+      for (const version of safeReaddir(pluginDir).sort(byVersionDesc)) {
         roots.push([join(pluginDir, version, 'skills'), skillName])
       }
     }
@@ -245,7 +255,10 @@ function main (raw) {
   if (config.denyThreshold !== null && tokens >= config.denyThreshold) decision = 'deny'
   else if (config.warnThreshold !== null && tokens >= config.warnThreshold) decision = 'ask'
 
-  log(config, { skill, bytes: found.size, tokens, kind, decision })
+  // ts first so a tail of the log reads chronologically. The log exists to pick a
+  // threshold from real usage, which means slicing it by session or by date —
+  // impossible without a time field.
+  log(config, { ts: new Date().toISOString(), skill, bytes: found.size, tokens, kind, decision })
   emit(decision, reason(skill, tokens, config, decision))
 }
 
