@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { estimateTokens, BYTES_PER_TOKEN_FLOOR } from '../hooks/estimate.mjs'
+import { estimateTokens, scriptCounts, BYTES_PER_TOKEN_FLOOR } from '../hooks/estimate.mjs'
 
 const GUARD = join(dirname(fileURLToPath(import.meta.url)), '..', 'hooks', 'guard.mjs')
 const sandbox = mkdtempSync(join(tmpdir(), 'ccg-'))
@@ -145,6 +145,20 @@ const mixed = estimateTokens(sprinkled)
 check('sprinkled CJK is not classed cjk', mixed.kind !== 'cjk', true)
 check('sprinkled CJK bills per character', mixed.tokens - plain.tokens < 20, true)
 
+// Astral-plane Han (CJK Ext B and later) must be billed at the Han rate, not as
+// English prose. Covering only the BMP left these in the non-CJK remainder at
+// RATIO.prose: 100 characters estimated 43 tokens against ~112 real, which is
+// under-counting — the failure mode the estimator exists to avoid.
+const astralHan = '\u{20000}\u{2A700}\u{2F800}'.repeat(40)
+const bmpHan = '中'.repeat(120)
+check('astral Han is classed cjk', estimateTokens(astralHan).kind, 'cjk')
+check('astral Han counts as Han characters', scriptCounts(astralHan).han, 120)
+check('astral Han prices like BMP Han', estimateTokens(astralHan).tokens, estimateTokens(bmpHan).tokens)
+// Ext G/H sit above the Ext B–F block and need their own range.
+check('CJK Ext G is classed cjk', estimateTokens('\u{30000}'.repeat(100)).kind, 'cjk')
+// The u flag must not change how BMP text is counted.
+check('BMP Han unchanged by the u flag', estimateTokens(bmpHan).tokens, 135)
+
 // --- the stat-only fast path must never skip a file that would warn ---
 // Regression: an ASCII markdown table is the densest input there is (1 byte per
 // character at the table divisor). A floor derived from CJK alone bounded this
@@ -176,6 +190,7 @@ const FLOOR_FIXTURES = {
   'cyrillic': 'это документ навыка для окна контекста ',
   'mixed 50/50': '| aaa | bbb |\n技能文件大小直接影响\n',
   'mixed 10/90': '| a |\n技能文件大小直接影响上下文窗口占用程度不可忽视\n',
+  'astral han': '\u{20000}\u{2A700}\u{2F800}',
 }
 let floorViolations = 0
 for (const [label, unit] of Object.entries(FLOOR_FIXTURES)) {
