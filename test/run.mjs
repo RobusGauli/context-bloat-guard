@@ -63,6 +63,26 @@ check('deny reason names the escape hatch', denyReason.includes('denyThreshold')
 check('ask reason keeps approve wording', /approve/i.test(askReason), true)
 check('high threshold allows', decision(run(skillCall('huge'), { warnThreshold: 10_000_000 })), 'allow')
 
+// --- config validation ---
+// null means OFF for a threshold. Before sanitizeConfig, `tokens >= null`
+// coerced to `tokens >= 0` and prompted on EVERY skill — the exact opposite of
+// what someone setting null is asking for.
+check('warnThreshold null silences the warning', decision(run(skillCall('huge'), { warnThreshold: null })), 'allow')
+check('warnThreshold null still allows tiny skills', decision(run(skillCall('tiny'), { warnThreshold: null })), 'allow')
+// ...but an explicit denyThreshold must still fire with warnThreshold off, and
+// the fast path has to clear that lower bar rather than the absent one.
+check('warnThreshold null keeps denyThreshold live', decision(run(skillCall('huge'), { warnThreshold: null, denyThreshold: 1000 })), 'deny')
+// A denyThreshold below warnThreshold must not be skipped by the fast path.
+check('deny below warn is not skipped', decision(run(skillCall('huge'), { warnThreshold: 10_000_000, denyThreshold: 1000 })), 'deny')
+
+// Wrong-typed values fall back to the default instead of reaching a comparison.
+check('string threshold falls back to default', decision(run(skillCall('huge'), { warnThreshold: 'lots' })), 'ask')
+check('negative threshold falls back to default', decision(run(skillCall('tiny'), { warnThreshold: -1 })), 'allow')
+check('object threshold falls back to default', decision(run(skillCall('huge'), { warnThreshold: {} })), 'ask')
+check('string enabled falls back to default', decision(run(skillCall('huge'), { enabled: 'false' })), 'ask')
+check('non-array alwaysAllow is ignored', decision(run(skillCall('huge'), { alwaysAllow: 'huge' })), 'ask')
+check('non-string config is ignored wholesale', decision(run(skillCall('huge'), [1, 2, 3])), 'ask')
+
 // lowercase skill.md is used by real skills (brain, google, slack)
 makeSkill('lower', '# lower\n' + 'prose here. '.repeat(6000), 'skill.md')
 check('lowercase skill.md resolves', decision(run(skillCall('lower'))), 'ask')

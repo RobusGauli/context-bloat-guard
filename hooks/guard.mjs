@@ -32,10 +32,33 @@ const DEFAULTS = {
   logPath: null,            // opt-in
 }
 
+// A hand-edited JSON file can hold anything, and every value here ends up in a
+// comparison or a path. Untyped values did not fail loudly — they failed
+// absurdly: `warnThreshold: null` coerces `tokens >= null` to `tokens >= 0`,
+// which is always true, so the one setting a user reaches for to quiet the guard
+// made it prompt on every single skill. Wrong-typed values fall back to the
+// default rather than flowing through.
+//
+// null is meaningful, not merely absent: for the two thresholds it means OFF,
+// matching denyThreshold's documented default.
+function sanitizeConfig (raw) {
+  const out = { ...DEFAULTS }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out
+
+  if (typeof raw.enabled === 'boolean') out.enabled = raw.enabled
+  for (const key of ['warnThreshold', 'denyThreshold', 'contextWindowSize']) {
+    if (raw[key] === null) out[key] = null
+    else if (typeof raw[key] === 'number' && Number.isFinite(raw[key]) && raw[key] > 0) out[key] = raw[key]
+  }
+  if (Array.isArray(raw.alwaysAllow)) out.alwaysAllow = raw.alwaysAllow.filter(n => typeof n === 'string')
+  if (raw.logPath === null || typeof raw.logPath === 'string') out.logPath = raw.logPath
+  return out
+}
+
 function loadConfig () {
   const path = process.env.CCG_CONFIG || join(homedir(), '.claude', 'context-bloat-guard.json')
   try {
-    return { ...DEFAULTS, ...JSON.parse(readFileSync(path, 'utf8')) }
+    return sanitizeConfig(JSON.parse(readFileSync(path, 'utf8')))
   } catch {
     return DEFAULTS // missing or corrupt config is not an error
   }
@@ -182,17 +205,24 @@ function main (raw) {
   // Skipped when logging is on: someone who set logPath asked to observe every
   // invocation, including the cheap ones they are trying to calibrate against.
   // They pay one small read for that.
+  // The fast path must clear the LOWEST threshold that can still fire, not
+  // warnThreshold specifically. Two reasons: warnThreshold may be null (off)
+  // while denyThreshold is set, and a denyThreshold below warnThreshold would
+  // otherwise let the guard skip a file it was configured to block outright.
+  const active = [config.warnThreshold, config.denyThreshold].filter(t => t !== null)
+  if (!active.length && !config.logPath) return // nothing can fire and nothing to record
+
   // The ceil is load-bearing, not cosmetic: estimateTokens ends in Math.ceil, so
   // for a pure-ASCII file the exact quotient can sit a fraction below the real
   // token count. Rounding the bound up restores the strict inequality.
-  if (!config.logPath && Math.ceil(found.size / BYTES_PER_TOKEN_FLOOR) < config.warnThreshold) return
+  if (!config.logPath && Math.ceil(found.size / BYTES_PER_TOKEN_FLOOR) < Math.min(...active)) return
 
   const text = readFileSync(found.path, 'utf8')
   const { tokens, kind } = estimateTokens(text)
 
   let decision = 'allow'
   if (config.denyThreshold !== null && tokens >= config.denyThreshold) decision = 'deny'
-  else if (tokens >= config.warnThreshold) decision = 'ask'
+  else if (config.warnThreshold !== null && tokens >= config.warnThreshold) decision = 'ask'
 
   log(config, { skill, bytes: found.size, tokens, kind, decision })
   emit(decision, reason(skill, tokens, config, decision))
