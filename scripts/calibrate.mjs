@@ -115,10 +115,24 @@ try {
 }
 
 const results = []
+const skipped = []
 for (const [label, text] of [...SYNTHETIC, ...realFixtures()]) {
   const actual = (await count(text)) - overhead
   const { tokens: est, kind } = estimateTokens(text)
   const chars = [...text].length
+
+  // An empty or whitespace-only SKILL.md measures at or below the wrapper
+  // overhead, so `actual` lands at 0 and the error is NaN. NaN then poisons
+  // worstOver through Math.max, and because `NaN < 0` is false the fixture never
+  // reaches the `under` list — the script would report a clean run and exit 0
+  // while a genuine under-estimate elsewhere in the same run went unreported.
+  // Drop these before they can contaminate the summary, and say how many.
+  if (actual <= 0) {
+    skipped.push(label)
+    console.log(`${label.padEnd(34)} skipped — measured ${actual} tokens (empty or wrapper-sized)`)
+    continue
+  }
+
   const error = (est - actual) / actual
 
   // Isolate the non-CJK population so a fixture with a few Chinese characters
@@ -175,8 +189,18 @@ for (const [script, { rate, label }] of byScript) {
 }
 
 const under = results.filter(r => r.error < 0)
-const worstOver = Math.max(...results.map(r => r.error))
-console.log(`\n${results.length} fixtures | under-estimates: ${under.length} | worst over-estimate: ${(worstOver * 100).toFixed(1)}%`)
+// Math.max() of an empty list is -Infinity, which would print as a nonsense
+// "worst over-estimate" if every fixture were skipped.
+const worstOver = results.length ? Math.max(...results.map(r => r.error)) : 0
+console.log(
+  `\n${results.length} fixtures | under-estimates: ${under.length}` +
+  ` | worst over-estimate: ${(worstOver * 100).toFixed(1)}%` +
+  (skipped.length ? ` | skipped: ${skipped.length} (${skipped.join(', ')})` : '')
+)
+if (!results.length) {
+  console.log('NO FIXTURES MEASURED — nothing was verified. Check the fixture paths.')
+  process.exit(2)
+}
 if (under.length) {
   console.log('UNDER-ESTIMATED (must be zero — see "Token estimation" in the README):')
   for (const r of under) console.log(`  ${r.label} ${(r.error * 100).toFixed(1)}%`)
