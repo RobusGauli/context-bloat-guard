@@ -481,6 +481,13 @@ check('status lists cached plugin skills', statusOut.includes('plug:b'), true)
 check('status shows the effective threshold', statusOut.includes('1,000 tokens'), true)
 check('disabled guard is called out loudly', runStatus({ enabled: false }).includes('DISABLED'), true)
 check('alwaysAllow shows as skip', /skip.*huge/.test(runStatus({ warnThreshold: 1000, alwaysAllow: ['huge'] })), true)
+check('status omits the stale-model hint when --model is given', statusOut.includes('possibly-stale'), false)
+check('status shows the stale-model hint without --model', runStatus({ warnThreshold: 1000 }).includes('possibly-stale'), true)
+check('status omits the stale-model hint when the window is configured', runStatus({ contextWindowSize: 200000 }).includes('possibly-stale'), false)
+
+// --- version mode ---
+const versionOut = execFileSync('node', [GUARD, '--version'], { cwd: sandbox, encoding: 'utf8' })
+check('--version prints the plugin name and version', /^context-bloat-guard v\d+\.\d+\.\d+\n$/.test(versionOut), true)
 
 // --- overhead ---
 const t0 = process.hrtime.bigint()
