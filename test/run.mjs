@@ -83,6 +83,33 @@ check('string enabled falls back to default', decision(run(skillCall('huge'), { 
 check('non-array alwaysAllow is ignored', decision(run(skillCall('huge'), { alwaysAllow: 'huge' })), 'ask')
 check('non-string config is ignored wholesale', decision(run(skillCall('huge'), [1, 2, 3])), 'ask')
 
+// --- percent thresholds ---
+// "N%" resolves against the usable budget at decision time, so one config
+// scales across a 200k and a 1M session instead of firing identically on both.
+// The configured-window cases keep the denominator deterministic; the
+// model-driven pair below is the actual point — same config, different verdict
+// by window. (`huge` estimates ~116k tokens.)
+check('percent warn fires above its share', decision(run(skillCall('huge'), { warnThreshold: '9%', contextWindowSize: 100000 })), 'ask')
+check('percent warn allows below its share', decision(run(skillCall('huge'), { warnThreshold: '90%', contextWindowSize: 10000000 })), 'allow')
+check('percent deny blocks outright', decision(run(skillCall('huge'), { warnThreshold: null, denyThreshold: '9%', contextWindowSize: 100000 })), 'deny')
+const pctCfg = { warnThreshold: '50%' }
+check('same percent asks on a 200k session', decision(run(skillCall('huge'), pctCfg, { ANTHROPIC_MODEL: 'claude-haiku-4-5-20251001' })), 'ask')
+check('and allows on a 1M session', decision(run(skillCall('huge'), pctCfg, { ANTHROPIC_MODEL: 'claude-opus-5' })), 'allow')
+// A percent deny must quote both the configured share and what it resolved to,
+// or the user cannot tell why the same skill passes in a bigger session.
+const pctDenyReason = reasonOf(run(skillCall('huge'), { denyThreshold: '9%', contextWindowSize: 100000 }))
+check('percent deny reason names the share', pctDenyReason.includes('9% of the usable budget'), true)
+check('percent deny reason names the resolved tokens', /9,000|9000/.test(pctDenyReason), true)
+// Malformed percent strings fall back to the default (15000 → huge asks,
+// tiny allows), never to a zero threshold that would fire on everything.
+check('malformed percent falls back to default', decision(run(skillCall('huge'), { warnThreshold: 'abc%' })), 'ask')
+check('percent over 100 falls back to default', decision(run(skillCall('tiny'), { warnThreshold: '150%' })), 'allow')
+check('zero percent falls back to default', decision(run(skillCall('tiny'), { warnThreshold: '0%' })), 'allow')
+check('bare fraction is not a percent', decision(run(skillCall('tiny'), { warnThreshold: '0.09' })), 'allow')
+// A window capped below the auto-compact reserve leaves no budget to take a
+// percent of — the threshold turns OFF (fail open), not into zero.
+check('percent with no budget fails open', decision(run(skillCall('huge'), { warnThreshold: '9%' }, { CLAUDE_CODE_MAX_CONTEXT_TOKENS: '20000' })), 'allow')
+
 // lowercase skill.md is used by real skills (brain, google, slack)
 makeSkill('lower', '# lower\n' + 'prose here. '.repeat(6000), 'skill.md')
 check('lowercase skill.md resolves', decision(run(skillCall('lower'))), 'ask')

@@ -72,7 +72,7 @@ Optional. `~/.claude/context-bloat-guard.json`, all keys optional:
 ```json
 {
   "enabled": true,
-  "warnThreshold": 15000,
+  "warnThreshold": "9%",
   "denyThreshold": null,
   "contextWindowSize": null,
   "alwaysAllow": ["my-big-but-essential-skill"],
@@ -83,14 +83,16 @@ Optional. `~/.claude/context-bloat-guard.json`, all keys optional:
 | Key | Default | Meaning |
 |---|---|---|
 | `enabled` | `true` | Master off switch. |
-| `warnThreshold` | `15000` | Tokens at or above which you get asked. ~9% of a 200k window's usable budget. Set `null` to turn the prompt off entirely — a `denyThreshold`, if set, still applies. |
-| `denyThreshold` | `null` | Tokens at or above which the load is refused outright. Off by default — see below. |
+| `warnThreshold` | `15000` | Cost at or above which you get asked. A number is absolute tokens; a string like `"9%"` is a share of the usable budget, resolved against the live window each invocation. Set `null` to turn the prompt off entirely — a `denyThreshold`, if set, still applies. |
+| `denyThreshold` | `null` | Cost at or above which the load is refused outright — same two forms as `warnThreshold`. Off by default — see below. |
 | `contextWindowSize` | `null` | Only used to express the cost as a percentage. `null` detects it from the environment — see below. Set a number to override, and it is used verbatim with no buffer deducted. |
 | `alwaysAllow` | `[]` | Skill names to never prompt on. Use the invoked name, including any `plugin:skill` prefix. |
 | `logPath` | `null` | Opt-in JSONL of every skill invocation, for tuning your own threshold. `~` is expanded. Setting it disables the stat-only fast path — cheap skills get read and recorded too, otherwise the log couldn't tell you where your threshold belongs. |
 
+**Why percent thresholds exist.** Windows differ 5x by model: 15,000 tokens is 9% of a 200k window's usable budget but 1.5% of a 1M one, so a fixed number either nags a 1M session or under-protects a 200k one. `"9%"` means the same *share* everywhere. Only the `"N%"` string form is accepted (0 < N ≤ 100) — a bare fraction like `0.09` would be indistinguishable from a token count. One trade-off: resolving a percent requires the window *before* the decision, so the bounded 64KB transcript read (see below) runs on every measured invocation rather than only when a warning fires. If the detected window has no usable budget at all (capped below the auto-compact reserve), a percent threshold turns off rather than firing on everything — fail open, as everywhere else.
+
 A missing or corrupt config file is not an error — defaults apply. So is an
-individual value of the wrong type: a threshold set to a string, a negative
+individual value of the wrong type: a threshold set to a malformed string, a negative
 number, or an object falls back to its default rather than reaching a comparison.
 
 Set `CCG_CONFIG` to point at a different config path (used by the test suite).
@@ -106,7 +108,7 @@ A percentage is only as good as its denominator, and a hardcoded `200000` was wr
 
 Then the buffer comes off. The nominal window is not what a skill competes for: the CLI holds back a **flat 33k auto-compact reserve** regardless of window size — measured via `/context` (2026-08-10, CLI 2.1.226): a 200k window reports 167k available, a 1M sonnet-5 window reports 967k, the same 33k at both. Two env vars this plugin used to honour were measured to have no effect on the CLI's accounting and are no longer read: `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` (byte-identical output whether unset, 50, or 80) and `CLAUDE_CODE_MAX_OUTPUT_TOKENS` (not deducted from input-side accounting).
 
-Two things worth knowing about step 4. **A 1M ceiling is not a 1M default** — measured 2026-08-10 per model via `/context` (CLI 2.1.226): `opus-4-6`, `sonnet-4-6` and `sonnet-4-5` are all 1M-capable and all report 200k by default (opus-4-6 verified both headless and interactively), while `fable-5`, `sonnet-5`, `opus-5` and `opus-4-8` report 1M. And **`$ANTHROPIC_MODEL` lies after a `/model` switch** — it is stamped at session start; a live Fable 5 session was observed with `ANTHROPIC_MODEL=claude-sonnet-4-6` in its hook environment, a 5x window difference. That is why the transcript tail is the primary signal: a bounded 64KB read that only happens when a warning is actually being composed, never on the silent path, failing open to the env var and then the base tier.
+Two things worth knowing about step 4. **A 1M ceiling is not a 1M default** — measured 2026-08-10 per model via `/context` (CLI 2.1.226): `opus-4-6`, `sonnet-4-6` and `sonnet-4-5` are all 1M-capable and all report 200k by default (opus-4-6 verified both headless and interactively), while `fable-5`, `sonnet-5`, `opus-5` and `opus-4-8` report 1M. And **`$ANTHROPIC_MODEL` lies after a `/model` switch** — it is stamped at session start; a live Fable 5 session was observed with `ANTHROPIC_MODEL=claude-sonnet-4-6` in its hook environment, a 5x window difference. That is why the transcript tail is the primary signal: a bounded 64KB read that only happens when a warning is actually being composed (or, with a percent threshold, once per measured invocation — the percent cannot be resolved without the window), failing open to the env var and then the base tier.
 
 Every one of these variables is the CLI's private, undocumented surface — found by dumping a real hook process's environment, not from documentation. They can be renamed between versions, so every read is optional and falls through silently.
 
@@ -163,7 +165,7 @@ The estimate is an upper bound, not a measurement, and the inflation is delibera
 npm test
 ```
 
-21 integration tests that drive the real hook binary with real payloads on stdin and assert on stdout — the contract under test is never mocked. Includes a timing loop so overhead regressions show up.
+100+ integration checks that drive the real hook binary with real payloads on stdin and assert on stdout — the contract under test is never mocked. Includes a timing loop so overhead regressions show up.
 
 ## Portability
 
