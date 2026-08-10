@@ -6,7 +6,7 @@
   "description": "Dev tooling for the context-bloat-guard Claude Code plugin. The plugin itself has zero runtime dependencies — nothing here is installed on a user's machine.",
   "license": "MIT",
   "scripts": {
-    "test": "node test/run.mjs",
+    "test": "node scripts/check-manifests.mjs && node test/run.mjs",
     "calibrate": "node scripts/calibrate.mjs",
     "models": "node scripts/models.mjs"
   },
