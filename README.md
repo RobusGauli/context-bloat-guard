@@ -102,11 +102,11 @@ A percentage is only as good as its denominator, and a hardcoded `200000` was wr
 1. **`contextWindowSize`** from your config, if you set a number. Taken verbatim.
 2. **`CLAUDE_CODE_MAX_CONTEXT_TOKENS`** — a hard cap set by the CLI.
 3. **`CLAUDE_CODE_AUTO_COMPACT_WINDOW`** — the figure `/context` displays.
-4. **The model's API ceiling**, clamped to the 200k base tier.
+4. **The model's API ceiling**, clamped to the 200k base tier only when an off-switch is active: `CLAUDE_CODE_DISABLE_1M_CONTEXT=1`, or `ANTHROPIC_BASE_URL` pointing at an LLM gateway (where the CLI can't verify 1M support). An explicit `[1m]` model variant counts as 1M even behind a gateway.
 
 Then the buffer comes off. The nominal window is not what a skill competes for: a 200k window carries a ~33k auto-compact buffer, and output tokens are reserved on top. Measured live via `/context`: a 200k window reported 167k available. `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` and `CLAUDE_CODE_MAX_OUTPUT_TOKENS` are honoured when present.
 
-Two things worth knowing about the clamp in step 4. **A model's API context window is not the window Claude Code gives its main loop** — `claude-opus-5` is 1M on the API but ran in a 200k auto-compact window in the session this was measured in, because the 1M tier is gated on account beta access that no environment variable exposes. So the model table is a *ceiling*, and the guard never guesses upward. And **the model itself usually isn't knowable** from a hook: only `$ANTHROPIC_MODEL` is readable, and it's unset unless you set it. Learning it for certain would mean parsing the transcript, which the hot path forbids. In practice step 4 yields the base tier.
+Two things worth knowing about step 4. **1M is the default on current frontier models, not a beta opt-in** — measured 2026-08-10 via `/context`: a default `claude-sonnet-5` session reports a ~1M window, and the same container with `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` reports 200k. (An earlier measurement that suggested a universal 200k cap turned out to have that flag injected by server-managed settings.) And **the model signal is fuzzy** from a hook: only `$ANTHROPIC_MODEL` is readable, and it can be unset or stale. That's tolerable because every current frontier row in the table is 1M and the off-switches apply regardless of which row matched. One residual risk is deliberate: a Pro-plan Opus session without usage credits actually runs at 200k, but the plan is invisible to a hook — set `contextWindowSize` if that's you.
 
 Every one of these variables is the CLI's private, undocumented surface — found by dumping a real hook process's environment, not from documentation. They can be renamed between versions, so every read is optional and falls through silently.
 
