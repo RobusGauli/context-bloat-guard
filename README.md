@@ -46,7 +46,12 @@ Requires `node` on `PATH` (any version with ESM — v14+). No other dependencies
 
 ## Configuration
 
-Optional. `~/.claude/context-bloat-guard.json`, all keys optional:
+Optional, at either or both of two levels — mirroring how Claude Code's own settings resolve:
+
+- **User**: `~/.claude/context-bloat-guard.json` — your defaults, every session
+- **Project**: `<project>/.claude/context-bloat-guard.json` — committed with the repo, overrides the user level **per key** (a project sets only what it means to change; `alwaysAllow` lists are unioned, not replaced)
+
+`CCG_CONFIG=<path>` overrides both — that file becomes the sole source. All keys optional:
 
 ```json
 {
@@ -68,7 +73,9 @@ Optional. `~/.claude/context-bloat-guard.json`, all keys optional:
 | `alwaysAllow` | `[]` | Skill names to never prompt on. Use the invoked name, including any `plugin:skill` prefix. |
 | `logPath` | `null` | Opt-in JSONL of every skill invocation, for tuning your own threshold. `~` is expanded. Setting it disables the stat-only fast path — cheap skills get read and recorded too, otherwise the log couldn't tell you where your threshold belongs. |
 
-The default threshold is a *percent* because windows differ 5x by model: a fixed token count either nags a 1M session or under-protects a 200k one, while `"7%"` means the same share everywhere. Malformed values never bite: a bad string, negative number, or wrong type falls back to its default, and a missing or corrupt config file just means defaults apply. Set `CCG_CONFIG` to point at a different config path.
+The default threshold is a *percent* because windows differ 5x by model: a fixed token count either nags a 1M session or under-protects a 200k one, while `"7%"` means the same share everywhere. Malformed values never bite: a bad string, negative number, or wrong type falls back to the layer below (project → user → default), and a missing or corrupt config file just means that layer contributes nothing.
+
+One trust-model note: because the project file rides along in the repo, a cloned repo can quiet the guard for sessions inside it (`enabled: false`, huge thresholds) — the same standing Claude Code grants a project's own `settings.json`. Nothing in a config is ever executed; the guard only measures.
 
 ### How the window is detected
 

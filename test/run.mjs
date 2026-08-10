@@ -119,6 +119,35 @@ makeSkill('midsize', '# mid\n' + 'the quick brown fox jumps over the lazy dog. '
 check('default warn is a share of the budget', decision(run(skillCall('midsize'), {}, { ANTHROPIC_MODEL: 'claude-haiku-4-5-20251001' })), 'ask')
 check('same skill clears a 1M default budget', decision(run(skillCall('midsize'), {}, { ANTHROPIC_MODEL: 'claude-opus-5' })), 'allow')
 
+// --- config layering ---
+// Without CCG_CONFIG the guard layers <cwd>/.claude/context-bloat-guard.json
+// over ~/.claude/context-bloat-guard.json PER KEY — a project overrides only
+// what it validly sets. CCG_CONFIG, when present, is the sole source.
+const cfgHome = join(sandbox, 'home-config')
+mkdirSync(join(cfgHome, '.claude'), { recursive: true })
+const userCfgPath = join(cfgHome, '.claude', 'context-bloat-guard.json')
+const projCfgPath = join(sandbox, '.claude', 'context-bloat-guard.json')
+function runLayered (payload, userCfg, projCfg) {
+  userCfg === null ? rmSync(userCfgPath, { force: true }) : writeFileSync(userCfgPath, JSON.stringify(userCfg))
+  projCfg === null ? rmSync(projCfgPath, { force: true }) : writeFileSync(projCfgPath, JSON.stringify(projCfg))
+  const env = { ...process.env, HOME: cfgHome }
+  delete env.CCG_CONFIG
+  const out = execFileSync('node', [GUARD], { input: JSON.stringify(payload), env, encoding: 'utf8' })
+  return out ? JSON.parse(out) : null
+}
+check('user-level config alone applies', decision(runLayered(skillCall('huge'), { warnThreshold: 10_000_000 }, null)), 'allow')
+check('project config overrides user per key', decision(runLayered(skillCall('huge'), { warnThreshold: 10_000_000 }, { warnThreshold: 1000 })), 'ask')
+check('project-only config applies', decision(runLayered(skillCall('huge'), null, { warnThreshold: 10_000_000 })), 'allow')
+check('key absent from project keeps user value', decision(runLayered(skillCall('huge'), { enabled: false }, { warnThreshold: 1000 })), 'allow')
+check('invalid project value keeps user value', decision(runLayered(skillCall('huge'), { warnThreshold: 10_000_000 }, { warnThreshold: 'junk' })), 'allow')
+// alwaysAllow is a union, not an override: a project list must not erase the
+// user's standing "never prompt on this" decisions.
+check('alwaysAllow unions across levels', decision(runLayered(skillCall('huge'), { alwaysAllow: ['huge'] }, { warnThreshold: 1000 })), 'allow')
+// With CCG_CONFIG set, a project file that would deny everything is ignored.
+writeFileSync(projCfgPath, JSON.stringify({ denyThreshold: 1 }))
+check('CCG_CONFIG is the sole source when set', decision(run(skillCall('tiny'))), 'allow')
+rmSync(projCfgPath, { force: true })
+
 // lowercase skill.md is used by real skills (brain, google, slack)
 makeSkill('lower', '# lower\n' + 'prose here. '.repeat(6000), 'skill.md')
 check('lowercase skill.md resolves', decision(run(skillCall('lower'))), 'ask')

@@ -1,7 +1,7 @@
 {
   "name": "context-bloat-guard",
   "description": "Measures a skill's SKILL.md before its body loads and warns when it would eat a meaningful share of your context window, suggesting subagent delegation instead.",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "author": {
     "name": "Robus Gauli",
     "url": "https://github.com/RobusGauli"

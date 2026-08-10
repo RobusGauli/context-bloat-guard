@@ -67,8 +67,15 @@ function parsePct (v) {
 //
 // null is meaningful, not merely absent: for the two thresholds it means OFF,
 // matching denyThreshold's documented default.
-function sanitizeConfig (raw) {
-  const out = { ...DEFAULTS }
+//
+// `base` makes this layerable: a key that is absent or wrong-typed in `raw`
+// keeps the BASE's value, so a project file only overrides what it actually
+// (validly) sets. With the default base this is the old behavior exactly.
+// alwaysAllow is the one union, not an override: "never prompt on X" is an
+// additive intent, and a project list silently erasing the user's would
+// re-prompt on skills the user already decided about.
+function sanitizeConfig (raw, base = DEFAULTS) {
+  const out = { ...base }
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out
 
   if (typeof raw.enabled === 'boolean') out.enabled = raw.enabled
@@ -82,18 +89,38 @@ function sanitizeConfig (raw) {
   }
   if (raw.contextWindowSize === null) out.contextWindowSize = null
   else if (typeof raw.contextWindowSize === 'number' && Number.isFinite(raw.contextWindowSize) && raw.contextWindowSize > 0) out.contextWindowSize = raw.contextWindowSize
-  if (Array.isArray(raw.alwaysAllow)) out.alwaysAllow = raw.alwaysAllow.filter(n => typeof n === 'string')
+  if (Array.isArray(raw.alwaysAllow)) {
+    out.alwaysAllow = [...new Set([...base.alwaysAllow, ...raw.alwaysAllow.filter(n => typeof n === 'string')])]
+  }
   if (raw.logPath === null || typeof raw.logPath === 'string') out.logPath = raw.logPath
   return out
 }
 
-function loadConfig () {
-  const path = process.env.CCG_CONFIG || join(homedir(), '.claude', 'context-bloat-guard.json')
+function readJson (path) {
   try {
-    return sanitizeConfig(JSON.parse(readFileSync(path, 'utf8')))
+    return JSON.parse(readFileSync(path, 'utf8'))
   } catch {
-    return DEFAULTS // missing or corrupt config is not an error
+    return null // missing or corrupt config is not an error
   }
+}
+
+// Config resolves like Claude Code's own settings: user level, then project
+// level layered over it per key. A project sets only what it means to change.
+//
+//   1. $CCG_CONFIG            — sole source when set (tests, one-off overrides)
+//   2. <cwd>/.claude/context-bloat-guard.json — project, wins per key
+//   3. ~/.claude/context-bloat-guard.json     — user, the base layer
+//
+// The project file rides along in the repo, so a team can commit stricter
+// thresholds. It is worth being clear-eyed about the trust model: a cloned
+// repo can therefore also QUIET the guard (enabled: false, huge thresholds)
+// for sessions inside it — the same standing Claude Code grants a project's
+// own settings.json, and nothing here executes; the guard only ever measures.
+function loadConfig (cwd) {
+  if (process.env.CCG_CONFIG) return sanitizeConfig(readJson(process.env.CCG_CONFIG))
+  const user = sanitizeConfig(readJson(join(homedir(), '.claude', 'context-bloat-guard.json')))
+  const project = readJson(join(cwd, '.claude', 'context-bloat-guard.json'))
+  return project ? sanitizeConfig(project, user) : user
 }
 
 function safeReaddir (dir) {
@@ -295,13 +322,14 @@ function main (raw) {
   const payload = JSON.parse(raw)
   if (payload.tool_name !== 'Skill') return
 
-  const config = loadConfig()
+  const cwd = payload.cwd || process.cwd()
+  const config = loadConfig(cwd)
   if (!config.enabled) return
 
   const skill = payload.tool_input?.skill
   if (!skill || config.alwaysAllow.includes(skill)) return
 
-  const found = resolveSkillFile(skill, payload.cwd || process.cwd())
+  const found = resolveSkillFile(skill, cwd)
   // Unresolvable — fail open. Notably includes CLI-bundled skills: their
   // SKILL.md is embedded in the binary and only their resource subdirectories
   // are unpacked to disk, so there is nothing to measure.
