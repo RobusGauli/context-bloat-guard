@@ -12,11 +12,15 @@
 //   - MEASURE, NEVER INTERPRET. SKILL.md is untrusted content. It is read as
 //     bytes and counted. It is never eval'd, never shelled out with, never
 //     interpolated into a command.
-//   - HOT PATH IS CHEAP. No network. No transcript parsing. Single stat() for
-//     the common case; bytes are only read when the file is big enough to
-//     possibly cross a threshold.
+//   - HOT PATH IS CHEAP. No network. Single stat() for the common case; bytes
+//     are only read when the file is big enough to possibly cross a threshold.
+//     The one exception: once a warning is actually being composed, a bounded
+//     64KB tail of the transcript is read to learn the ACTIVE model — the env
+//     var goes stale on /model switches, and windows differ 5x by model, so
+//     the read buys correctness of the headline number. Measured ~1ms; it
+//     never runs on the silent path.
 
-import { readFileSync, statSync, appendFileSync, realpathSync, readdirSync } from 'node:fs'
+import { readFileSync, statSync, appendFileSync, realpathSync, readdirSync, openSync, readSync, closeSync, fstatSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
 
@@ -157,8 +161,38 @@ function pct (tokens, window) {
 // skill actually competes for is materially smaller — quoting the nominal
 // figure understates every skill's cost by ~20% at the base tier. The nominal
 // number is still named so the arithmetic is checkable.
-function share (tokens, config) {
-  const window = resolveWindow(config.contextWindowSize)
+// The active model, read from the transcript's tail. Every assistant message
+// is stamped with the model that produced it, so the last stamp is the model
+// the session is running RIGHT NOW — unlike $ANTHROPIC_MODEL, which is set at
+// session start and survives, stale, across a mid-session /model switch
+// (observed live: a fable-5 session whose environment still said
+// claude-sonnet-4-6, a 5x window difference). 64KB of tail is hundreds of
+// messages; any failure falls through to null and resolveWindow's env
+// fallback. Values not starting with "claude-" (e.g. "<synthetic>" stamps on
+// error records) are skipped.
+function modelFromTranscript (path) {
+  if (!path) return null
+  try {
+    const fd = openSync(path, 'r')
+    try {
+      const size = fstatSync(fd).size
+      const len = Math.min(size, 65536)
+      const buf = Buffer.alloc(len)
+      readSync(fd, buf, 0, len, size - len)
+      const stamps = buf.toString('utf8').match(/"model":\s*"(claude-[^"]+)"/g)
+      if (!stamps) return null
+      return stamps[stamps.length - 1].match(/"model":\s*"([^"]+)"/)[1]
+    } finally {
+      closeSync(fd)
+    }
+  } catch {
+    return null
+  }
+}
+
+function share (tokens, config, transcriptPath) {
+  const model = modelFromTranscript(transcriptPath) ?? process.env.ANTHROPIC_MODEL
+  const window = resolveWindow(config.contextWindowSize, model)
   // A configured window is documented as "used verbatim with no buffer
   // deducted" (issue #9): someone who set a number has already decided what
   // the denominator is. Only a detected window pays the auto-compact reserve.
@@ -180,8 +214,8 @@ function share (tokens, config) {
 // different readers. An "ask" is rendered to the user with an Approve button;
 // a "deny" is returned to the model with no prompt and no way to consent, so
 // telling it to approve would send it chasing an affordance that isn't there.
-function reason (skill, tokens, config, decision) {
-  const costShare = share(tokens, config)
+function reason (skill, tokens, config, decision, transcriptPath) {
+  const costShare = share(tokens, config, transcriptPath)
   return [
     `Skill "${skill}" will inject ~${tokens.toLocaleString()} tokens${costShare} into this context, permanently for the rest of the session.`,
     '',
@@ -264,7 +298,9 @@ function main (raw) {
   // threshold from real usage, which means slicing it by session or by date —
   // impossible without a time field.
   log(config, { ts: new Date().toISOString(), skill, bytes: found.size, tokens, kind, decision })
-  emit(decision, reason(skill, tokens, config, decision))
+  // reason() is built only when something will be said — it is the one place
+  // the transcript tail gets read, and an allowed skill must not pay for it.
+  if (decision !== 'allow') emit(decision, reason(skill, tokens, config, decision, payload.transcript_path))
 }
 
 let input = ''
