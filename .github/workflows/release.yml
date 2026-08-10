@@ -1,0 +1,46 @@
+# Tags and publishes a GitHub Release whenever a version bump lands on main.
+#
+# Claude Code does not consume tags or releases — `/plugin update` pulls the
+# default branch and reads plugin.json — so this exists purely so humans can
+# see what changed before updating. The trigger is the version field itself:
+# check-manifests (wired into `npm test`) guarantees package.json agrees with
+# plugin.json, so plugin.json is the single source of truth watched here.
+#
+# Idempotent: a push that touches plugin.json without changing the version
+# (or a re-run) finds the tag already present and does nothing.
+name: release
+
+on:
+  push:
+    branches: [main]
+    paths: ['.claude-plugin/plugin.json']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history so --generate-notes can diff since the previous tag
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # The suite has zero runtime dependencies — no npm install needed.
+      - name: Test
+        run: npm test
+
+      - name: Release if the version is new
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="v$(node -p 'require("./.claude-plugin/plugin.json").version')"
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "$tag already exists — nothing to release"
+            exit 0
+          fi
+          gh release create "$tag" --target "$GITHUB_SHA" --title "$tag" --generate-notes
