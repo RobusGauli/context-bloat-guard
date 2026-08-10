@@ -169,7 +169,7 @@ npm test
 
 ## Releases
 
-Every version bump on `main` is tagged and published to [GitHub Releases](https://github.com/RobusGauli/context-bloat-guard/releases) automatically, with notes generated from the merged PRs — check there before `/plugin update` to see what changed. The version in `.claude-plugin/plugin.json` is the source of truth; `npm test` refuses drift between the three manifests.
+Every version bump on `main` is tagged and published to [GitHub Releases](https://github.com/RobusGauli/context-bloat-guard/releases) automatically, with notes generated from the merged PRs — check there before `/plugin update` to see what changed. The version in `.claude-plugin/plugin.json` is the source of truth; `npm test` refuses drift between the three manifests. Cutting a release is documented in [RELEASE.md](RELEASE.md).
 
 ## Portability
 
