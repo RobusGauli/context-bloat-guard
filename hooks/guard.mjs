@@ -509,7 +509,22 @@ function status (argv) {
   }
   if (!skills.length) lines.push('  (none found)')
 
+  // The hint travels in the payload, not in the command prompt: everything in
+  // stdout is shown verbatim, so the rendering model never has to decide
+  // whether the window is "wrong" — that judgement caused unpredictable
+  // /status output.
+  if (!configured && mi === -1) {
+    lines.push('')
+    lines.push('note: window derived from a possibly-stale signal — for an exact figure re-run with --model <your-model-id>')
+  }
+
   console.log(lines.join('\n'))
+}
+
+if (process.argv.includes('--version')) {
+  const v = readJson(join(dirname(fileURLToPath(import.meta.url)), '..', '.claude-plugin', 'plugin.json'))?.version ?? 'unknown'
+  console.log(`context-bloat-guard v${v}`)
+  process.exit(0)
 }
 
 if (process.argv.includes('--status')) {

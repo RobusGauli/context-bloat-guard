@@ -5,4 +5,4 @@ allowed-tools: Bash(node:*)
 
 !`node "${CLAUDE_PLUGIN_ROOT}/hooks/guard.mjs" --status`
 
-Show verbatim in code block; if `window:` model wrong, re-run with `--model <your-model-id>`.
+Output the tool result above verbatim inside one ```text code block. Do not summarize, reformat, reorder, or omit lines. Add nothing before or after the code block. Do not re-run the command.
