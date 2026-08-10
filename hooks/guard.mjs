@@ -153,21 +153,26 @@ function pct (tokens, window) {
 }
 
 // The share is quoted against the USABLE budget, not the nominal window. A
-// nominal 200k window carries a ~33k auto-compact buffer and a reserved output
-// budget, so the room a skill actually competes for is materially smaller —
-// quoting the nominal figure understates every skill's cost by ~20%. The
-// nominal number is still named so the arithmetic is checkable.
+// nominal 200k window carries a flat 33k auto-compact reserve, so the room a
+// skill actually competes for is materially smaller — quoting the nominal
+// figure understates every skill's cost by ~20% at the base tier. The nominal
+// number is still named so the arithmetic is checkable.
 function share (tokens, config) {
   const window = resolveWindow(config.contextWindowSize)
-  const budget = usableBudget(window)
+  // A configured window is documented as "used verbatim with no buffer
+  // deducted" (issue #9): someone who set a number has already decided what
+  // the denominator is. Only a detected window pays the auto-compact reserve.
+  const cfg = Number(config.contextWindowSize)
+  const configured = Number.isFinite(cfg) && cfg > 0
+  const budget = configured ? window : usableBudget(window)
   if (!budget) return ''
   const k = n => `${Math.round(n / 1000)}k`
   const p = pct(tokens, budget)
-  // An explicitly configured window is taken at face value, so there is no
-  // buffer to explain.
-  const basis = config.contextWindowSize
+  // A configured window is taken at face value, so there is no buffer to
+  // explain.
+  const basis = configured
     ? `${k(budget)} usable context`
-    : `${k(budget)} usable context (${k(window)} window, less the auto-compact buffer and reserved output)`
+    : `${k(budget)} usable context (${k(window)} window, less the auto-compact buffer)`
   return ` = ${p}% of your ${basis}`
 }
 

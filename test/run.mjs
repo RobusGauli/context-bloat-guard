@@ -299,30 +299,37 @@ check('[1m] suffix is stripped before lookup', modelCeiling('claude-haiku-4-5-20
 check('unknown model has no ceiling', modelCeiling('claude-not-a-model'), null)
 check('empty model has no ceiling', modelCeiling(''), null)
 
-// The usable budget is the number the user cares about: nominal window less the
-// auto-compact buffer and whatever output is reserved.
+// The usable budget is the nominal window less a FLAT 33k auto-compact
+// reserve. Measured 2026-08-10 via /context (CLI 2.1.226): 33k on a 200k
+// window and 33k on a 967k sonnet-5 window. The fraction this replaced
+// (0.835 = 1 - 33000/200000) was fitted at the base tier and predicted a 165k
+// buffer at 1M against a real 33k.
 noEnv()
-check('usable budget discounts the compact buffer', usableBudget(200000), 167000)
+check('usable budget discounts the compact reserve', usableBudget(200000), 167000)
+check('the reserve is flat, not a fraction of the window', usableBudget(1000000), 967000)
+// Both env vars were measured to have no effect on the CLI's accounting —
+// byte-identical /context output with them set or unset — so the budget must
+// not move with them. The predecessors of these checks asserted the opposite
+// (119000 and 72000).
 process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = '48000'
-check('reserved output is subtracted', usableBudget(200000), 119000)
+check('reserved output is not deducted', usableBudget(200000), 167000)
 process.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = '60'
-check('pct override wins over the measured default', usableBudget(200000), 72000)
+check('pct override is inert', usableBudget(200000), 167000)
 noEnv()
-// A setup reserving more output than the window allows must not report negative.
-process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = '999999'
-check('over-reservation clamps at zero', usableBudget(200000), 0)
-noEnv()
+// A configured window smaller than the reserve must not report negative.
+check('window below the reserve clamps at zero', usableBudget(20000), 0)
 
 // The reason text must quote the usable budget, not the nominal window — the
 // whole point of the change.
 const budgetReason = reasonOf(run(skillCall('huge')))
 check('reason quotes usable context', /167k usable context/.test(budgetReason), true)
 check('reason names the nominal window', /200k window/.test(budgetReason), true)
-// An explicitly configured window is taken at face value, so the buffer
-// explanation would be a lie.
+// An explicitly configured window is used verbatim — no reserve deducted, no
+// buffer wording (issue #9). The predecessor of this check expected 84k, the
+// configured 100k scaled by the old fraction, contradicting the README.
 const configuredReason = reasonOf(run(skillCall('huge'), { contextWindowSize: 100000 }))
 check('configured window omits buffer wording', /auto-compact buffer/.test(configuredReason), false)
-check('configured window is used as the basis', /84k usable context/.test(configuredReason), true)
+check('configured window is used verbatim', /100k usable context/.test(configuredReason), true)
 
 // --- logging: opting in must capture cheap skills too, not just expensive ones,
 // or the log is useless for choosing a threshold ---
