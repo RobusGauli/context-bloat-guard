@@ -237,7 +237,7 @@ check('byte bound is never below the real estimate', floorViolations, 0)
 import { resolveWindow, usableBudget, modelCeiling } from '../hooks/window.mjs'
 
 const noEnv = () => {
-  for (const k of ['CLAUDE_CODE_MAX_CONTEXT_TOKENS', 'CLAUDE_CODE_AUTO_COMPACT_WINDOW', 'CLAUDE_CODE_DISABLE_1M_CONTEXT', 'CLAUDE_AUTOCOMPACT_PCT_OVERRIDE', 'CLAUDE_CODE_MAX_OUTPUT_TOKENS', 'ANTHROPIC_MODEL']) delete process.env[k]
+  for (const k of ['CLAUDE_CODE_MAX_CONTEXT_TOKENS', 'CLAUDE_CODE_AUTO_COMPACT_WINDOW', 'CLAUDE_CODE_DISABLE_1M_CONTEXT', 'CLAUDE_AUTOCOMPACT_PCT_OVERRIDE', 'CLAUDE_CODE_MAX_OUTPUT_TOKENS', 'ANTHROPIC_MODEL', 'ANTHROPIC_BASE_URL']) delete process.env[k]
 }
 
 noEnv()
@@ -255,17 +255,47 @@ process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = '150000'
 check('auto-compact window is honoured', resolveWindow(null), 150000)
 noEnv()
 
-// A 1M model must never be reported as 1M while Claude Code runs it at 200k —
-// measured live: claude-opus-5 (1M on the API) in a 200k auto-compact window.
-check('1M model clamps to base tier', resolveWindow(null, 'claude-opus-5'), 200000)
+// Measured 2026-08-10 (CLI 2.1.226), one variable per run: a default
+// claude-sonnet-5 session reports a ~1M window; the same container with
+// CLAUDE_CODE_DISABLE_1M_CONTEXT=1 reports 200k; claude-opus-5 reports 1m;
+// claude-haiku-4-5 reports 200k. The predecessor of these tests asserted
+// 200000 on both sides of the flag, so `return 200000` passed them — the
+// inequality check below makes any single-value implementation fail.
+const flagOff = resolveWindow(null, 'claude-opus-5')
 process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = '1'
-check('1M model clamps with 1M disabled', resolveWindow(null, 'claude-opus-5'), 200000)
+const flagOn = resolveWindow(null, 'claude-opus-5')
+noEnv()
+check('1M model reports its ceiling', flagOff, 1000000)
+check('disable flag clamps a 1M model to base tier', flagOn, 200000)
+check('the flag changes the window', flagOff !== flagOn, true)
+
+check('base-tier model stays at base tier', resolveWindow(null, 'claude-haiku-4-5-20251001'), 200000)
+check('unknown model falls back to base tier', resolveWindow(null, 'claude-not-a-model'), 200000)
+
+// The [1m] suffix is the CLI's marker for an explicitly selected 1M variant.
+// For a known id the prefix matcher would already resolve it; for an id the
+// table has not caught up with, the suffix is the sole 1M signal.
+check('[1m] suffix on a known id resolves', resolveWindow(null, 'claude-opus-4-8[1m]'), 1000000)
+check('[1m] suffix alone marks an unknown id as 1M', resolveWindow(null, 'claude-zeta-9[1m]'), 1000000)
+process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = '1'
+check('disable flag outranks the [1m] suffix', resolveWindow(null, 'claude-opus-4-8[1m]'), 200000)
+noEnv()
+
+// Behind an LLM gateway Claude Code can't verify 1M support and budgets 200K,
+// unless the user explicitly selects a [1m] variant.
+process.env.ANTHROPIC_BASE_URL = 'https://gateway.corp.example/v1'
+check('gateway clamps to base tier', resolveWindow(null, 'claude-opus-5'), 200000)
+check('[1m] suffix overrides the gateway clamp', resolveWindow(null, 'claude-sonnet-5[1m]'), 1000000)
+noEnv()
+process.env.ANTHROPIC_BASE_URL = 'https://api.anthropic.com'
+check('first-party base URL does not clamp', resolveWindow(null, 'claude-opus-5'), 1000000)
 noEnv()
 
 // Dated transcript ids must match the bare table keys and vice versa, or every
 // legacy session silently falls through to the default.
 check('dated id matches bare key', modelCeiling('claude-opus-5-20260101'), 1000000)
 check('bare id matches dated key', modelCeiling('claude-haiku-4-5'), 200000)
+check('[1m] suffix is stripped before lookup', modelCeiling('claude-haiku-4-5-20251001[1m]'), 200000)
 check('unknown model has no ceiling', modelCeiling('claude-not-a-model'), null)
 check('empty model has no ceiling', modelCeiling(''), null)
 

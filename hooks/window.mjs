@@ -4,18 +4,31 @@
 // variables and consults a baked table. Nothing else.
 //
 // THE DISTINCTION THAT MATTERS. A model's API context window
-// (max_input_tokens — 1M on every current frontier model) is NOT the window
-// Claude Code gives its main loop. Measured 2026-08-05 via /context in a live
-// session: model claude-opus-5, whose API window is 1M, reported
-// "Auto-compact window: 200k tokens". Claude Code caps the main loop to the
-// base tier unless the 1M context beta is active, and beta eligibility is an
-// account property that no environment variable exposes.
+// (max_input_tokens — 1M on every current frontier model) IS the window Claude
+// Code gives its main loop on current frontier models, unless something turns
+// it off. Measured 2026-08-10 via /context (CLI 2.1.226), one variable per run:
+// default claude-sonnet-5 session reported a 967k window (1M less the
+// auto-compact buffer); the same container with CLAUDE_CODE_DISABLE_1M_CONTEXT=1
+// reported 200k; claude-opus-5 reported 1m; claude-haiku-4-5 reported 200k.
 //
-// So MODEL_WINDOWS is a CEILING, not the answer. Reporting a skill as "6% of
-// your 1000k window" when it is really 9% of a 200k window would be worse than
-// the hardcoded 200000 it replaced. Resolution below goes: explicit config,
-// then what the CLI tells us, then the model ceiling clamped to the base tier.
-// It never guesses UP — same reason the estimator never under-counts.
+// An earlier measurement (2026-08-05) that showed opus-5 in a 200k window and
+// justified an unconditional clamp here was confounded: that environment had
+// CLAUDE_CODE_DISABLE_1M_CONTEXT=1 injected by server-managed settings. The
+// observation showed the off-switch working, not a universal cap.
+//
+// So MODEL_WINDOWS is the answer unless one of the documented off-switches is
+// active: CLAUDE_CODE_DISABLE_1M_CONTEXT=1 (docs: "treats Sonnet 5 sessions as
+// having a 200K window"), or an LLM gateway (docs: when ANTHROPIC_BASE_URL
+// points at a gateway, Claude Code can't verify 1M support and budgets 200K —
+// unless the user explicitly selects a [1m] model variant). Resolution below:
+// explicit config, then what the CLI tells us, then the model ceiling with the
+// off-switches applied.
+//
+// Residual risk, deliberate: on the Pro plan, Opus at 1M requires usage
+// credits, and the plan is invisible to a hook. Reporting 1M for a Pro-plan
+// Opus session without credits would overstate the window; clamping would
+// misreport the measured-1M common case 5x the other way. The common case
+// wins; `contextWindowSize` in config is the escape hatch.
 
 // Claude Code's default main-loop window.
 const BASE_TIER = 200_000
@@ -65,6 +78,10 @@ function truthy (v) {
 // future "claude-opus-4-5-mini".
 export function modelCeiling (model) {
   if (!model) return null
+  // Ids may carry a [1m] suffix ("claude-opus-4-8[1m]") — the CLI's marker for
+  // an explicitly selected 1M variant, stripped before the id reaches the
+  // provider. Strip it here too so the table lookup sees the bare id.
+  model = model.replace(/\[1m\]$/, '')
   if (MODEL_WINDOWS[model]) return MODEL_WINDOWS[model]
   let best = null
   let bestLen = 0
@@ -83,12 +100,14 @@ export function modelCeiling (model) {
 // be renamed between versions — so every read is optional and falls through
 // silently.
 //
-// `model` defaults to $ANTHROPIC_MODEL, the CLI's own main-model override. It is
-// unset in a normal session — the model is then whatever the user picked
-// interactively, which reaches the hook nowhere — so this usually falls through
-// to the base tier. It is wired up anyway because it costs nothing and is the
-// only zero-I/O model signal available: learning the model for certain would
-// mean parsing the transcript, which the hot path forbids.
+// `model` defaults to $ANTHROPIC_MODEL, the CLI's own main-model override. When
+// unset, or set to something stale (observed: a session running fable-5 with
+// ANTHROPIC_MODEL=claude-sonnet-4-6 in the hook environment), the ceiling
+// lookup falls back to the base tier or lands on the wrong row — tolerable
+// because every current frontier row is 1M and the off-switches below apply
+// regardless of which row matched. It is the only zero-I/O model signal
+// available: learning the model for certain would mean parsing the transcript,
+// which the hot path forbids.
 export function resolveWindow (configured, model = process.env.ANTHROPIC_MODEL) {
   // 1. Explicit config wins: someone who set a number knows their setup better
   //    than any inference here.
@@ -104,13 +123,29 @@ export function resolveWindow (configured, model = process.env.ANTHROPIC_MODEL) 
   const autoCompact = num(process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW)
   if (autoCompact) return autoCompact
 
-  // 4. The model's API ceiling, clamped to the base tier. Unclamped this would
-  //    report 1M for a session Claude Code is actually running at 200k. The
-  //    clamp applies either way today; the explicit branch keeps the intent
-  //    legible if the base tier ever moves.
+  // 4. The model's API ceiling, clamped only when a documented off-switch is
+  //    active. Every table entry is >= BASE_TIER, so "clamp" means "return the
+  //    base tier".
+  const oneM = /\[1m\]$/.test(model ?? '')
   const ceiling = modelCeiling(model) ?? BASE_TIER
-  if (truthy(process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT)) return Math.min(ceiling, BASE_TIER)
-  return Math.min(ceiling, BASE_TIER)
+
+  // Documented off-switch, for deployments that need to cap context. Measured:
+  // it drops a default 967k sonnet-5 session to 200k. Outranks everything
+  // below, including an explicit [1m] variant — the flag removes 1M variants
+  // from the model picker, so honoring a suffix past it would defeat the cap.
+  if (truthy(process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT)) return BASE_TIER
+
+  // An explicit [1m] variant is a definitive 1M signal even for an id the
+  // table has not caught up with, and per the docs it is exactly how a user
+  // gets the full window behind a gateway — so it beats the gateway clamp.
+  if (oneM) return Math.max(ceiling, 1_000_000)
+
+  // Behind an LLM gateway Claude Code can't verify 1M support and budgets the
+  // base tier; mirror that.
+  const base = process.env.ANTHROPIC_BASE_URL
+  if (base && !/^https?:\/\/api\.anthropic\.com\/?$/.test(base)) return BASE_TIER
+
+  return ceiling
 }
 
 // What is actually available before auto-compact fires — the number the user
