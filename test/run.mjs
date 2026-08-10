@@ -100,7 +100,7 @@ check('and allows on a 1M session', decision(run(skillCall('huge'), pctCfg, { AN
 const pctDenyReason = reasonOf(run(skillCall('huge'), { denyThreshold: '9%', contextWindowSize: 100000 }))
 check('percent deny reason names the share', pctDenyReason.includes('9% of the usable budget'), true)
 check('percent deny reason names the resolved tokens', /9,000|9000/.test(pctDenyReason), true)
-// Malformed percent strings fall back to the default (15000 → huge asks,
+// Malformed percent strings fall back to the default ("7%" → huge asks,
 // tiny allows), never to a zero threshold that would fire on everything.
 check('malformed percent falls back to default', decision(run(skillCall('huge'), { warnThreshold: 'abc%' })), 'ask')
 check('percent over 100 falls back to default', decision(run(skillCall('tiny'), { warnThreshold: '150%' })), 'allow')
@@ -109,6 +109,15 @@ check('bare fraction is not a percent', decision(run(skillCall('tiny'), { warnTh
 // A window capped below the auto-compact reserve leaves no budget to take a
 // percent of — the threshold turns OFF (fail open), not into zero.
 check('percent with no budget fails open', decision(run(skillCall('huge'), { warnThreshold: '9%' }, { CLAUDE_CODE_MAX_CONTEXT_TOKENS: '20000' })), 'allow')
+
+// The DEFAULT is now a share ("7%"), not a number. A skill between 7% of the
+// 167k base-tier budget (~11.7k tokens) and the old 15k default must ask on a
+// 200k session — and the very same skill must clear a 1M session's budget.
+// The model is pinned so a leaked env var on the test machine cannot move the
+// denominator.
+makeSkill('midsize', '# mid\n' + 'the quick brown fox jumps over the lazy dog. '.repeat(670))
+check('default warn is a share of the budget', decision(run(skillCall('midsize'), {}, { ANTHROPIC_MODEL: 'claude-haiku-4-5-20251001' })), 'ask')
+check('same skill clears a 1M default budget', decision(run(skillCall('midsize'), {}, { ANTHROPIC_MODEL: 'claude-opus-5' })), 'allow')
 
 // lowercase skill.md is used by real skills (brain, google, slack)
 makeSkill('lower', '# lower\n' + 'prose here. '.repeat(6000), 'skill.md')
@@ -209,7 +218,7 @@ check('BMP Han unchanged by the u flag', estimateTokens(bmpHan).tokens, 135)
 // --- the stat-only fast path must never skip a file that would warn ---
 // Regression: an ASCII markdown table is the densest input there is (1 byte per
 // character at the table divisor). A floor derived from CJK alone bounded this
-// 33 KB file at 14,740 tokens, under the 15,000 default, so it was never read
+// 33 KB file at 14,740 tokens, under the then-default 15,000, so it was never read
 // and never warned about — while its real cost is ~15,700.
 let tableBody = ''
 while (Buffer.byteLength(tableBody) < 33000) tableBody += '| aaa | bbb | ccc |\n'
@@ -218,9 +227,12 @@ makeSkill('dense-table', tableBody)
 // the file sits in the dead band — big enough to cross the threshold, small
 // enough that the old floor bounded it under.
 const denseTokens = estimateTokens(tableBody).tokens
-check('table fixture crosses the default threshold', denseTokens >= 15000, true)
+// The threshold is pinned to the 15000 tokens the regression was found under —
+// the default is a percent now, which would let the test's bar drift with the
+// environment's window instead of exercising the floor.
+check('table fixture crosses the pinned threshold', denseTokens >= 15000, true)
 check('table fixture was skipped by the old floor', Buffer.byteLength(tableBody) / (3 / 1.34) < 15000, true)
-check('dense ASCII table asks', decision(run(skillCall('dense-table'))), 'ask')
+check('dense ASCII table asks', decision(run(skillCall('dense-table'), { warnThreshold: 15000 })), 'ask')
 
 // The invariant the fast path rests on, asserted directly rather than inferred
 // from any single fixture: for every input, the byte bound must be at least the

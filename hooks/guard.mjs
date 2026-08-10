@@ -31,7 +31,12 @@ import { resolveWindow, usableBudget } from './window.mjs'
 
 const DEFAULTS = {
   enabled: true,
-  warnThreshold: 15000,     // tokens; ~9% of a 200k window's usable budget
+  // 7% of the usable budget, whatever the session's window turns out to be —
+  // ~11.7k tokens at the 200k base tier, ~67.7k at 1M. A share, not a number,
+  // because the number meant wildly different things across windows (the
+  // 15000-token default this replaces was 9% of a 200k budget but 1.5% of a
+  // 1M one). Internal { pct } form; the config-file spelling is "7%".
+  warnThreshold: { pct: 7 },
   denyThreshold: null,      // off by default — see README "ask vs deny"
   contextWindowSize: null,  // null = detect from the environment; see window.mjs
   alwaysAllow: [],

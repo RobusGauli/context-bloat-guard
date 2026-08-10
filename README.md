@@ -72,7 +72,7 @@ Optional. `~/.claude/context-bloat-guard.json`, all keys optional:
 ```json
 {
   "enabled": true,
-  "warnThreshold": "9%",
+  "warnThreshold": "7%",
   "denyThreshold": null,
   "contextWindowSize": null,
   "alwaysAllow": ["my-big-but-essential-skill"],
@@ -83,13 +83,13 @@ Optional. `~/.claude/context-bloat-guard.json`, all keys optional:
 | Key | Default | Meaning |
 |---|---|---|
 | `enabled` | `true` | Master off switch. |
-| `warnThreshold` | `15000` | Cost at or above which you get asked. A number is absolute tokens; a string like `"9%"` is a share of the usable budget, resolved against the live window each invocation. Set `null` to turn the prompt off entirely — a `denyThreshold`, if set, still applies. |
+| `warnThreshold` | `"7%"` | Cost at or above which you get asked. A string like `"7%"` is a share of the usable budget, resolved against the live window each invocation (~11.7k tokens at the 200k base tier, ~67.7k at 1M); a number is absolute tokens. Set `null` to turn the prompt off entirely — a `denyThreshold`, if set, still applies. |
 | `denyThreshold` | `null` | Cost at or above which the load is refused outright — same two forms as `warnThreshold`. Off by default — see below. |
 | `contextWindowSize` | `null` | Only used to express the cost as a percentage. `null` detects it from the environment — see below. Set a number to override, and it is used verbatim with no buffer deducted. |
 | `alwaysAllow` | `[]` | Skill names to never prompt on. Use the invoked name, including any `plugin:skill` prefix. |
 | `logPath` | `null` | Opt-in JSONL of every skill invocation, for tuning your own threshold. `~` is expanded. Setting it disables the stat-only fast path — cheap skills get read and recorded too, otherwise the log couldn't tell you where your threshold belongs. |
 
-**Why percent thresholds exist.** Windows differ 5x by model: 15,000 tokens is 9% of a 200k window's usable budget but 1.5% of a 1M one, so a fixed number either nags a 1M session or under-protects a 200k one. `"9%"` means the same *share* everywhere. Only the `"N%"` string form is accepted (0 < N ≤ 100) — a bare fraction like `0.09` would be indistinguishable from a token count. One trade-off: resolving a percent requires the window *before* the decision, so the bounded 64KB transcript read (see below) runs on every measured invocation rather than only when a warning fires. If the detected window has no usable budget at all (capped below the auto-compact reserve), a percent threshold turns off rather than firing on everything — fail open, as everywhere else.
+**Why the default is a percent.** Windows differ 5x by model: 15,000 tokens (the old default) is 9% of a 200k window's usable budget but 1.5% of a 1M one, so a fixed number either nags a 1M session or under-protects a 200k one. `"7%"` means the same *share* everywhere. Only the `"N%"` string form is accepted (0 < N ≤ 100) — a bare fraction like `0.09` would be indistinguishable from a token count. One trade-off: resolving a percent requires the window *before* the decision, so the bounded 64KB transcript read (see below) runs on every measured invocation rather than only when a warning fires. If the detected window has no usable budget at all (capped below the auto-compact reserve), a percent threshold turns off rather than firing on everything — fail open, as everywhere else.
 
 A missing or corrupt config file is not an error — defaults apply. So is an
 individual value of the wrong type: a threshold set to a malformed string, a negative
@@ -124,7 +124,7 @@ These are not stylistic preferences. Violating any one of them makes the plugin 
 
 **Measure, never interpret.** SKILL.md is untrusted content — it may come from any marketplace. It is opened, read as bytes, and counted. It is never evaluated, never passed to a shell, never interpolated into a command. `realpathSync` pins a single inode for the stat-then-read pair, which also resolves symlinked skill directories.
 
-**The hot path is cheap.** No network calls. No transcript parsing. The common case is a single `stat()`: if a file cannot reach the threshold even at the worst possible byte-to-token ratio (3 bytes/token, i.e. dense CJK), it is never read. Measured mean wall time is 25–31 ms per invocation, and node's cold start is essentially all of it — the guard's own work is 1–3 ms. If you want that back, the only lever is not spawning a process at all.
+**The hot path is cheap.** No network calls. With an absolute (number) threshold the common case is a single `stat()`: if a file cannot reach the threshold even at the worst possible byte-to-token ratio (3 bytes/token, i.e. dense CJK), it is never read. A percent threshold — including the default — additionally pays the bounded 64KB transcript tail read (~1ms) to learn the window the percent is a share of. Measured mean wall time is 25–31 ms per invocation, and node's cold start is essentially all of it — the guard's own work is 1–3 ms. If you want that back, the only lever is not spawning a process at all.
 
 ## Token estimation
 
