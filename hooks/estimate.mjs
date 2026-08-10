@@ -10,10 +10,13 @@
 // Calibrate with scripts/calibrate.mjs; do not hand-tune.
 //
 // Measured 2026-08-05 against POST /v1/messages/count_tokens on claude-opus-5:
-// 74 fixtures (8 synthetic + 66 real SKILL.md files). Each divisor is the worst
-// (smallest) chars/token observed in its class, less a 3% margin, so no fixture
-// under-counts. The seeded values these replaced (3.8 / 3.2 / 2.9) under-counted
-// 68 of 74 fixtures, worst -36.7%.
+// 77 fixtures (11 synthetic + 66 real SKILL.md files) — the corpus SYNTHETIC in
+// scripts/calibrate.mjs actually holds, and the count README.md and
+// ESTIMATION.md both record. Each divisor is the worst (smallest) chars/token
+// observed in its class, less a 3% margin, so no fixture under-counts. The
+// seeded values these replaced (3.8 / 3.2 / 2.9) under-counted 68 of 74 — that
+// tally is against the 74-fixture corpus of the time, before the three pure
+// single-script CJK samples were added — worst -36.7%.
 export const RATIO = {
   prose: 2.33,
   code: 2.16,
