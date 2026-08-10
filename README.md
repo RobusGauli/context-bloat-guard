@@ -99,7 +99,7 @@ Set `CCG_CONFIG` to point at a different config path (used by the test suite).
 
 ### How the window is detected
 
-A percentage is only as good as its denominator, and a hardcoded `200000` was wrong for most sessions. `hooks/window.mjs` resolves it in this order, all from environment variables — no I/O, no network, nothing that could slow the hot path:
+A percentage is only as good as its denominator, and a hardcoded `200000` was wrong for most sessions. The window is resolved in this order — no network, and the only I/O is the bounded transcript-tail read in step 4:
 
 1. **`contextWindowSize`** from your config, if you set a number. Taken verbatim.
 2. **`CLAUDE_CODE_MAX_CONTEXT_TOKENS`** — a hard cap set by the CLI.
