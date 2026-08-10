@@ -52,6 +52,17 @@ To verify the install (and see what the guard sees), run:
 
 The report prints the plugin version, where your config came from and what it resolved to (thresholds, window, usable budget), and the ten costliest skills on disk with the verdict each would get. The guard is silent below the threshold by design, so this command is the positive "it's working" signal — if the report prints, `node` is on `PATH` and the hook executes.
 
+### Updating
+
+Installing does not keep you current — the plugin stays at the version you installed until you update it. Check [GitHub Releases](https://github.com/RobusGauli/context-bloat-guard/releases) to see what changed, then:
+
+```
+/plugin marketplace update context-bloat-guard
+/plugin update context-bloat-guard
+```
+
+The first command refreshes the local marketplace snapshot (without it, `/plugin update` — and even a reinstall — can serve the stale version it was added with); the second installs the new version. Start a new session, then confirm with `/context-bloat-guard:status` — the first line prints the version now running.
+
 ## Configuration
 
 Optional, at either or both of two levels — mirroring how Claude Code's own settings resolve:
