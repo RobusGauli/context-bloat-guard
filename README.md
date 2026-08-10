@@ -44,6 +44,14 @@ To use a local clone instead:
 
 Requires `node` on `PATH` (any version with ESM — v14+). No other dependencies at runtime; nothing is installed into your project. macOS and Linux; Windows is not supported. (Installing the hook by hand instead of as a plugin is covered in [docs/manual-install.md](docs/manual-install.md).)
 
+To verify the install (and see what the guard sees), run:
+
+```
+/context-bloat-guard:status
+```
+
+The report prints the plugin version, where your config came from and what it resolved to (thresholds, window, usable budget), and the ten costliest skills on disk with the verdict each would get. The guard is silent below the threshold by design, so this command is the positive "it's working" signal — if the report prints, `node` is on `PATH` and the hook executes.
+
 ## Configuration
 
 Optional, at either or both of two levels — mirroring how Claude Code's own settings resolve:
