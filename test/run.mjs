@@ -459,6 +459,29 @@ check('log captures above-threshold skill', logged[1]?.decision, 'ask')
 check('log records carry a timestamp', typeof logged[0]?.ts, 'string')
 check('timestamp is a valid ISO instant', new Date(logged[0]?.ts).toISOString(), logged[0]?.ts)
 
+// --- status mode ---
+// `--status` is the readiness/health report behind /context-bloat-guard:status.
+// It must run without stdin (the command shell provides none), reflect the same
+// config resolution as the hook, and rank the skills the hook can see.
+function runStatus (config, args = [], env = {}) {
+  const configPath = join(sandbox, `config-${configSeq++}.json`)
+  writeFileSync(configPath, JSON.stringify(config ?? {}))
+  return execFileSync('node', [GUARD, '--status', ...args], {
+    cwd: sandbox,
+    env: { ...process.env, CCG_CONFIG: configPath, HOME: fakeHome, ...env },
+    encoding: 'utf8',
+  })
+}
+const statusOut = runStatus({ warnThreshold: 1000 }, ['--model', 'claude-opus-5'])
+check('status names the plugin and version', /context-bloat-guard v\d+\.\d+\.\d+/.test(statusOut), true)
+check('status resolves the window from --model', statusOut.includes('1,000,000'), true)
+check('status ranks project skills', statusOut.includes('huge'), true)
+check('status marks skills over the threshold', /ASK .*huge/.test(statusOut), true)
+check('status lists cached plugin skills', statusOut.includes('plug:b'), true)
+check('status shows the effective threshold', statusOut.includes('1,000 tokens'), true)
+check('disabled guard is called out loudly', runStatus({ enabled: false }).includes('DISABLED'), true)
+check('alwaysAllow shows as skip', /skip.*huge/.test(runStatus({ warnThreshold: 1000, alwaysAllow: ['huge'] })), true)
+
 // --- overhead ---
 const t0 = process.hrtime.bigint()
 for (let i = 0; i < 20; i++) run(skillCall('tiny'))

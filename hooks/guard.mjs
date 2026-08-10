@@ -22,9 +22,10 @@
 //     configured, which cannot be resolved to tokens without the window and so
 //     pays the same bounded read up front.
 
-import { readFileSync, statSync, appendFileSync, realpathSync, readdirSync, openSync, readSync, closeSync, fstatSync } from 'node:fs'
+import { readFileSync, statSync, appendFileSync, realpathSync, readdirSync, openSync, readSync, closeSync, fstatSync, existsSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, resolve, sep } from 'node:path'
+import { join, resolve, sep, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { estimateTokens, BYTES_PER_TOKEN_FLOOR } from './estimate.mjs'
 import { resolveWindow, usableBudget } from './window.mjs'
@@ -390,6 +391,130 @@ function main (raw) {
   // skill never pays for it; with a percent threshold it was already read and
   // memoized above.
   if (decision !== 'allow') emit(decision, reason(skill, tokens, config, decision, budgetCtx(), denyTokens))
+}
+
+// --- status mode -----------------------------------------------------------
+//
+// `guard.mjs --status` prints a human-readable health report instead of acting
+// as a hook: effective config and where each layer came from, the resolved
+// window/thresholds, and the costliest installed skills. Surfaced to users via
+// the /context-bloat-guard:status command (commands/status.md). The fact that
+// the report prints at all is itself the readiness signal — it proves node is
+// on PATH and the guard executes, the two things that can silently break the
+// hook. Unlike the hook path, errors here are LOUD: a status report that fails
+// open would defeat its purpose.
+
+// Every skill the guard could resolve, measured. Mirrors resolveSkillFile's
+// roots (project, user, newest version of each cached plugin) so the report
+// covers exactly the population the hook can see — CLI-bundled skills are
+// absent here for the same reason the hook cannot measure them.
+function listSkills (cwd) {
+  const home = homedir()
+  const found = []
+  const addRoot = (base, prefix = '') => {
+    for (const name of safeReaddir(base)) {
+      for (const file of ['SKILL.md', 'skill.md']) {
+        try {
+          const real = realpathSync(join(base, name, file))
+          if (!statSync(real).isFile()) continue
+          found.push({ name: prefix + name, path: real })
+          break
+        } catch { /* next file */ }
+      }
+    }
+  }
+  addRoot(join(cwd, '.claude', 'skills'))
+  addRoot(join(home, '.claude', 'skills'))
+  const cache = join(home, '.claude', 'plugins', 'cache')
+  for (const marketplace of safeReaddir(cache)) {
+    for (const plugin of safeReaddir(join(cache, marketplace))) {
+      const versions = safeReaddir(join(cache, marketplace, plugin)).sort(byVersionDesc)
+      if (versions.length) addRoot(join(cache, marketplace, plugin, versions[0], 'skills'), plugin + ':')
+    }
+  }
+  // First hit wins on a name collision, matching resolveSkillFile's order.
+  const seen = new Set()
+  return found.filter(s => !seen.has(s.name) && seen.add(s.name))
+}
+
+function status (argv) {
+  const fmt = n => n.toLocaleString('en-US')
+  const cwd = process.cwd()
+  const config = loadConfig(cwd)
+
+  // The active model cannot be read from a transcript here — there is no hook
+  // payload. The status command passes the model id it knows itself to be via
+  // --model; without it the env var (stale across /model switches) is the
+  // best available signal, and the report says which basis it used.
+  const mi = argv.indexOf('--model')
+  const model = mi > -1 && argv[mi + 1] ? argv[mi + 1] : (process.env.ANTHROPIC_MODEL ?? null)
+  const modelBasis = mi > -1 && argv[mi + 1] ? '--model' : (process.env.ANTHROPIC_MODEL ? '$ANTHROPIC_MODEL (may be stale after /model)' : 'unknown, assuming base tier')
+
+  const version = readJson(join(dirname(fileURLToPath(import.meta.url)), '..', '.claude-plugin', 'plugin.json'))?.version ?? 'unknown'
+  const window = resolveWindow(config.contextWindowSize, model)
+  const cfg = Number(config.contextWindowSize)
+  const configured = Number.isFinite(cfg) && cfg > 0
+  const budget = configured ? window : usableBudget(window)
+
+  const toTokens = t => t === null || typeof t === 'number'
+    ? t
+    : (budget ? Math.max(1, Math.round(budget * t.pct / 100)) : null)
+  const warnTokens = toTokens(config.warnThreshold)
+  const denyTokens = toTokens(config.denyThreshold)
+  const showThreshold = (t, tokens) => t === null ? 'off'
+    : typeof t === 'number' ? `${fmt(t)} tokens`
+      : `${t.pct}% of usable budget${tokens !== null ? ` = ${fmt(tokens)} tokens here` : ' (unresolvable: no budget)'}`
+
+  const userPath = join(homedir(), '.claude', 'context-bloat-guard.json')
+  const projectPath = join(cwd, '.claude', 'context-bloat-guard.json')
+
+  const lines = []
+  lines.push(`context-bloat-guard v${version} — guard ran under node ${process.version}; the hook is installed and executable`)
+  if (!config.enabled) lines.push('\n*** GUARD IS DISABLED ("enabled": false) — no skill will be measured or warned about ***')
+  lines.push('')
+  lines.push('config sources:')
+  if (process.env.CCG_CONFIG) {
+    lines.push(`  CCG_CONFIG=${process.env.CCG_CONFIG} (sole source; user/project files ignored)`)
+  } else {
+    lines.push(`  user:    ${userPath} — ${existsSync(userPath) ? 'present' : 'absent (defaults apply)'}`)
+    lines.push(`  project: ${projectPath} — ${existsSync(projectPath) ? 'present (overrides user per key)' : 'absent'}`)
+  }
+  lines.push('')
+  lines.push('effective config:')
+  lines.push(`  enabled:        ${config.enabled}`)
+  lines.push(`  warnThreshold:  ${showThreshold(config.warnThreshold, warnTokens)}`)
+  lines.push(`  denyThreshold:  ${showThreshold(config.denyThreshold, denyTokens)}`)
+  lines.push(`  window:         ${configured
+    ? `${fmt(window)} tokens (configured, used verbatim as the budget)`
+    : `${fmt(window)} tokens (model: ${model ?? 'unknown'}, via ${modelBasis}) → ${fmt(budget)} usable after the auto-compact reserve`}`)
+  lines.push(`  alwaysAllow:    ${config.alwaysAllow.length ? config.alwaysAllow.join(', ') : '(none)'}`)
+  lines.push(`  logPath:        ${config.logPath ?? 'off'}`)
+
+  const skills = listSkills(cwd).map(s => {
+    try {
+      return { ...s, tokens: estimateTokens(readFileSync(s.path, 'utf8')).tokens }
+    } catch {
+      return null
+    }
+  }).filter(Boolean).sort((a, b) => b.tokens - a.tokens)
+
+  lines.push('')
+  lines.push(`costliest installed skills (top 10 of ${skills.length} measurable; CLI-bundled skills are not on disk and cannot be measured):`)
+  for (const s of skills.slice(0, 10)) {
+    const verdict = config.alwaysAllow.includes(s.name) ? 'skip'
+      : denyTokens !== null && s.tokens >= denyTokens ? 'DENY'
+        : warnTokens !== null && s.tokens >= warnTokens ? 'ASK '
+          : 'ok  '
+    lines.push(`  ${verdict}  ~${fmt(s.tokens).padStart(7)} tokens${budget ? ` = ${String(pct(s.tokens, budget)).padStart(2)}%` : ''}  ${s.name}`)
+  }
+  if (!skills.length) lines.push('  (none found)')
+
+  console.log(lines.join('\n'))
+}
+
+if (process.argv.includes('--status')) {
+  status(process.argv)
+  process.exit(0)
 }
 
 let input = ''
