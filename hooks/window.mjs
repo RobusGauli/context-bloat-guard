@@ -16,19 +16,23 @@
 // CLAUDE_CODE_DISABLE_1M_CONTEXT=1 injected by server-managed settings. The
 // observation showed the off-switch working, not a universal cap.
 //
-// So MODEL_WINDOWS is the answer unless one of the documented off-switches is
-// active: CLAUDE_CODE_DISABLE_1M_CONTEXT=1 (docs: "treats Sonnet 5 sessions as
-// having a 200K window"), or an LLM gateway (docs: when ANTHROPIC_BASE_URL
-// points at a gateway, Claude Code can't verify 1M support and budgets 200K —
-// unless the user explicitly selects a [1m] model variant). Resolution below:
-// explicit config, then what the CLI tells us, then the model ceiling with the
-// off-switches applied.
+// A SECOND DISTINCTION, measured 2026-08-10: a model's ceiling is not its
+// DEFAULT. Some 1M-capable models run at the base tier unless the 1M variant
+// is explicitly selected. Measured per model on this account, headless and
+// (for opus-4-6) interactively, same answer on both surfaces:
+//   1M by default:   fable-5, sonnet-5, opus-5, opus-4-8  (docs: "always run
+//                    with the 1M window" covers Fable 5, Sonnet 5, Opus 4.7+)
+//   200k by default: opus-4-6, sonnet-4-6, sonnet-4-5 — 1M exists but is
+//                    opt-in (usage credits / [1m] picker variant)
+// DEFAULT_1M below encodes that split. A model outside it gets the base tier
+// unless its id carries the explicit [1m] suffix.
 //
-// Residual risk, deliberate: on the Pro plan, Opus at 1M requires usage
-// credits, and the plan is invisible to a hook. Reporting 1M for a Pro-plan
-// Opus session without credits would overstate the window; clamping would
-// misreport the measured-1M common case 5x the other way. The common case
-// wins; `contextWindowSize` in config is the escape hatch.
+// So the resolution is: explicit config, then what the CLI tells us, then the
+// model's DEFAULT window, with the documented off-switches applied:
+// CLAUDE_CODE_DISABLE_1M_CONTEXT=1 (docs: "treats Sonnet 5 sessions as having
+// a 200K window"), or an LLM gateway (docs: when ANTHROPIC_BASE_URL points at
+// a gateway, Claude Code can't verify 1M support and budgets 200K — unless the
+// user explicitly selects a [1m] model variant).
 
 // Claude Code's default main-loop window.
 const BASE_TIER = 200_000
@@ -77,6 +81,21 @@ export const MODEL_WINDOWS = {
   'claude-sonnet-4-5-20250929': 1_000_000,
 }
 
+// Models that run the 1M window BY DEFAULT — no credits, no [1m] variant, no
+// picker step. Membership requires either a live measurement or the docs'
+// "always run with the 1M window" list (Fable 5, Sonnet 5, Opus 4.7 and
+// later); a ceiling of 1M in MODEL_WINDOWS is deliberately not enough, because
+// opus-4-6 / sonnet-4-6 / sonnet-4-5 all have 1M ceilings and all measured
+// 200k by default (2026-08-10, CLI 2.1.226). Bare ids; dated variants match by
+// prefix, like MODEL_WINDOWS keys.
+const DEFAULT_1M = ['claude-fable-5', 'claude-sonnet-5', 'claude-opus-5', 'claude-opus-4-8', 'claude-opus-4-7']
+
+function defaultsToOneM (model) {
+  if (!model) return false
+  const bare = model.replace(/\[1m\]$/, '')
+  return DEFAULT_1M.some(id => bare === id || bare.startsWith(id + '-'))
+}
+
 function num (v) {
   const n = Number(v)
   return Number.isFinite(n) && n > 0 ? n : null
@@ -116,14 +135,13 @@ export function modelCeiling (model) {
 // be renamed between versions — so every read is optional and falls through
 // silently.
 //
-// `model` defaults to $ANTHROPIC_MODEL, the CLI's own main-model override. When
-// unset, or set to something stale (observed: a session running fable-5 with
-// ANTHROPIC_MODEL=claude-sonnet-4-6 in the hook environment), the ceiling
-// lookup falls back to the base tier or lands on the wrong row — tolerable
-// because every current frontier row is 1M and the off-switches below apply
-// regardless of which row matched. It is the only zero-I/O model signal
-// available: learning the model for certain would mean parsing the transcript,
-// which the hot path forbids.
+// `model` should be the ACTIVE model. The caller (guard.mjs) reads it from the
+// transcript tail, which stamps every assistant message with the model that
+// produced it — the only signal that survives a mid-session /model switch. The
+// $ANTHROPIC_MODEL default here is the fallback for when no transcript is
+// available: it is stamped at session start and goes stale the moment the user
+// switches models (observed live: a fable-5 session whose hook environment
+// still said claude-sonnet-4-6).
 export function resolveWindow (configured, model = process.env.ANTHROPIC_MODEL) {
   // 1. Explicit config wins: someone who set a number knows their setup better
   //    than any inference here.
@@ -161,7 +179,11 @@ export function resolveWindow (configured, model = process.env.ANTHROPIC_MODEL) 
   const base = process.env.ANTHROPIC_BASE_URL
   if (base && !/^https?:\/\/api\.anthropic\.com\/?$/.test(base)) return BASE_TIER
 
-  return ceiling
+  // The ceiling is what the model CAN address; the default is what a session
+  // actually gets. Only models measured (or documented) as 1M-by-default
+  // report their ceiling — a 1M-capable model whose 1M is opt-in runs at the
+  // base tier unless the [1m] suffix said otherwise above.
+  return defaultsToOneM(model) ? ceiling : BASE_TIER
 }
 
 // What is actually available before auto-compact fires — the number the user

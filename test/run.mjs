@@ -272,6 +272,16 @@ check('the flag changes the window', flagOff !== flagOn, true)
 check('base-tier model stays at base tier', resolveWindow(null, 'claude-haiku-4-5-20251001'), 200000)
 check('unknown model falls back to base tier', resolveWindow(null, 'claude-not-a-model'), 200000)
 
+// A 1M CEILING is not a 1M DEFAULT. opus-4-6, sonnet-4-6 and sonnet-4-5 are
+// all 1M-capable and all measured at 200k by default (2026-08-10, headless
+// and — for opus-4-6 — interactively, same answer). Only the models measured
+// or documented as always-1M report their ceiling.
+check('opus-4-6 is 1M-capable but defaults to base tier', resolveWindow(null, 'claude-opus-4-6'), 200000)
+check('sonnet-4-6 defaults to base tier', resolveWindow(null, 'claude-sonnet-4-6'), 200000)
+check('sonnet-4-5 defaults to base tier', resolveWindow(null, 'claude-sonnet-4-5-20250929'), 200000)
+check('opt-in model with [1m] suffix gets its ceiling', resolveWindow(null, 'claude-sonnet-4-6[1m]'), 1000000)
+check('dated variant of a default-1M model matches by prefix', resolveWindow(null, 'claude-fable-5-20260101'), 1000000)
+
 // The [1m] suffix is the CLI's marker for an explicitly selected 1M variant.
 // For a known id the prefix matcher would already resolve it; for an id the
 // table has not caught up with, the suffix is the sole 1M signal.
@@ -330,6 +340,42 @@ check('reason names the nominal window', /200k window/.test(budgetReason), true)
 const configuredReason = reasonOf(run(skillCall('huge'), { contextWindowSize: 100000 }))
 check('configured window omits buffer wording', /auto-compact buffer/.test(configuredReason), false)
 check('configured window is used verbatim', /100k usable context/.test(configuredReason), true)
+
+// --- active-model detection from the transcript tail ---
+// $ANTHROPIC_MODEL is stamped at session start and survives, stale, across a
+// mid-session /model switch (observed live: a fable-5 session whose hook env
+// still said claude-sonnet-4-6 — a 5x window difference). The transcript
+// stamps every assistant message with the producing model, so its LAST stamp
+// is the active model and must outrank the env var.
+const transcriptOf = lines => {
+  const p = join(sandbox, `transcript-${configSeq++}.jsonl`)
+  writeFileSync(p, lines.map(l => JSON.stringify(l)).join('\n') + '\n')
+  return p
+}
+const withTranscript = path => ({ ...skillCall('huge'), transcript_path: path })
+
+const switched = transcriptOf([
+  { type: 'assistant', message: { model: 'claude-haiku-4-5-20251001' } },
+  { type: 'assistant', message: { model: 'claude-fable-5' } },
+])
+// The env var names a 200k model in EVERY era of this code, so this check can
+// only pass by actually reading the transcript's later 1M stamp.
+const switchedReason = reasonOf(run(withTranscript(switched), {}, { ANTHROPIC_MODEL: 'claude-haiku-4-5-20251001' }))
+check('transcript model outranks the stale env var', /1000k window/.test(switchedReason), true)
+
+// Error records are stamped "<synthetic>"; only real claude-* stamps count.
+const synthetic = transcriptOf([
+  { type: 'assistant', message: { model: 'claude-opus-5' } },
+  { type: 'assistant', message: { model: '<synthetic>' } },
+])
+check('synthetic stamps are skipped', /1000k window/.test(reasonOf(run(withTranscript(synthetic), {}))), true)
+
+// No transcript, or an unreadable one, falls back to the env var; env var
+// absent falls back to the base tier. Fail-open at every step.
+const envOnly = reasonOf(run(skillCall('huge'), {}, { ANTHROPIC_MODEL: 'claude-opus-5' }))
+check('env model is the fallback without a transcript', /1000k window/.test(envOnly), true)
+const missing = reasonOf(run(withTranscript(join(sandbox, 'does-not-exist.jsonl')), {}, { ANTHROPIC_MODEL: 'claude-opus-5' }))
+check('unreadable transcript falls back to the env var', /1000k window/.test(missing), true)
 
 // --- logging: opting in must capture cheap skills too, not just expensive ones,
 // or the log is useless for choosing a threshold ---
