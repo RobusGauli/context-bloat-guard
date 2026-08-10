@@ -18,7 +18,9 @@
 //     64KB tail of the transcript is read to learn the ACTIVE model — the env
 //     var goes stale on /model switches, and windows differ 5x by model, so
 //     the read buys correctness of the headline number. Measured ~1ms; it
-//     never runs on the silent path.
+//     never runs on the silent path — unless a percent ("N%") threshold is
+//     configured, which cannot be resolved to tokens without the window and so
+//     pays the same bounded read up front.
 
 import { readFileSync, statSync, appendFileSync, realpathSync, readdirSync, openSync, readSync, closeSync, fstatSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -36,6 +38,21 @@ const DEFAULTS = {
   logPath: null,            // opt-in
 }
 
+// A threshold holds one of three shapes after sanitizing: null (off), a number
+// (absolute tokens), or { pct } — a percent of the USABLE budget, resolved
+// against the live window at decision time. The percent form exists because
+// windows differ 5x by model (200k vs 1M): a fixed 15k is 9% of one and 1.5%
+// of the other, so the same config either nags a 1M session or under-protects
+// a 200k one. Only the "N%" string form is accepted — a bare fraction like
+// 0.09 is indistinguishable from a (nonsensical) token count.
+function parsePct (v) {
+  if (typeof v !== 'string') return null
+  const m = v.match(/^(\d+(?:\.\d+)?)\s*%$/)
+  if (!m) return null
+  const pct = Number(m[1])
+  return pct > 0 && pct <= 100 ? { pct } : null
+}
+
 // A hand-edited JSON file can hold anything, and every value here ends up in a
 // comparison or a path. Untyped values did not fail loudly — they failed
 // absurdly: `warnThreshold: null` coerces `tokens >= null` to `tokens >= 0`,
@@ -50,10 +67,16 @@ function sanitizeConfig (raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out
 
   if (typeof raw.enabled === 'boolean') out.enabled = raw.enabled
-  for (const key of ['warnThreshold', 'denyThreshold', 'contextWindowSize']) {
+  for (const key of ['warnThreshold', 'denyThreshold']) {
     if (raw[key] === null) out[key] = null
     else if (typeof raw[key] === 'number' && Number.isFinite(raw[key]) && raw[key] > 0) out[key] = raw[key]
+    else {
+      const pct = parsePct(raw[key])
+      if (pct) out[key] = pct
+    }
   }
+  if (raw.contextWindowSize === null) out.contextWindowSize = null
+  else if (typeof raw.contextWindowSize === 'number' && Number.isFinite(raw.contextWindowSize) && raw.contextWindowSize > 0) out.contextWindowSize = raw.contextWindowSize
   if (Array.isArray(raw.alwaysAllow)) out.alwaysAllow = raw.alwaysAllow.filter(n => typeof n === 'string')
   if (raw.logPath === null || typeof raw.logPath === 'string') out.logPath = raw.logPath
   return out
@@ -190,7 +213,7 @@ function modelFromTranscript (path) {
   }
 }
 
-function share (tokens, config, transcriptPath) {
+function resolveBudget (config, transcriptPath) {
   const model = modelFromTranscript(transcriptPath) ?? process.env.ANTHROPIC_MODEL
   const window = resolveWindow(config.contextWindowSize, model)
   // A configured window is documented as "used verbatim with no buffer
@@ -199,6 +222,10 @@ function share (tokens, config, transcriptPath) {
   const cfg = Number(config.contextWindowSize)
   const configured = Number.isFinite(cfg) && cfg > 0
   const budget = configured ? window : usableBudget(window)
+  return { window, budget, configured }
+}
+
+function share (tokens, { window, budget, configured }) {
   if (!budget) return ''
   const k = n => `${Math.round(n / 1000)}k`
   const p = pct(tokens, budget)
@@ -214,8 +241,15 @@ function share (tokens, config, transcriptPath) {
 // different readers. An "ask" is rendered to the user with an Approve button;
 // a "deny" is returned to the model with no prompt and no way to consent, so
 // telling it to approve would send it chasing an affordance that isn't there.
-function reason (skill, tokens, config, decision, transcriptPath) {
-  const costShare = share(tokens, config, transcriptPath)
+function reason (skill, tokens, config, decision, ctx, denyTokens) {
+  const costShare = share(tokens, ctx)
+  // A percent denyThreshold quotes both forms — the configured share and the
+  // token count it resolved to in THIS session's window — so the user can see
+  // why the same skill passes elsewhere.
+  const denyDesc = decision !== 'deny' ? ''
+    : typeof config.denyThreshold === 'number'
+      ? `${config.denyThreshold.toLocaleString()} tokens`
+      : `${config.denyThreshold.pct}% of the usable budget = ${denyTokens.toLocaleString()} tokens here`
   return [
     `Skill "${skill}" will inject ~${tokens.toLocaleString()} tokens${costShare} into this context, permanently for the rest of the session.`,
     '',
@@ -224,7 +258,7 @@ function reason (skill, tokens, config, decision, transcriptPath) {
     'main window pays for the summary, not the whole SKILL.md.',
     '',
     decision === 'deny'
-      ? `Blocked outright by denyThreshold (${config.denyThreshold.toLocaleString()} tokens) — no permission prompt is shown, and this call cannot be retried into one. Delegate to a subagent, or raise or unset denyThreshold in your context-bloat-guard.json to permit inline loads this large.`
+      ? `Blocked outright by denyThreshold (${denyDesc}) — no permission prompt is shown, and this call cannot be retried into one. Delegate to a subagent, or raise or unset denyThreshold in your context-bloat-guard.json to permit inline loads this large.`
       : 'Approve to load it inline anyway.',
   ].join('\n')
 }
@@ -268,6 +302,26 @@ function main (raw) {
   // are unpacked to disk, so there is nothing to measure.
   if (!found) return
 
+  // Resolve each threshold to a token count. A percent threshold needs the
+  // window BEFORE any decision — the one case where the bounded 64KB
+  // transcript read (see modelFromTranscript) runs ahead of the warn path.
+  // Number thresholds keep the old cost profile: no transcript read unless a
+  // warning is actually composed. The context is memoized so the ask/deny path
+  // never reads the transcript twice.
+  let ctx = null
+  const budgetCtx = () => (ctx ??= resolveBudget(config, payload.transcript_path))
+  const toTokens = t => {
+    if (t === null || typeof t === 'number') return t
+    const { budget } = budgetCtx()
+    // No budget to take a percent of (e.g. a capped window smaller than the
+    // auto-compact reserve): treat the threshold as OFF rather than as zero,
+    // which would fire on every skill. Fail open, as everywhere else.
+    // max(1) keeps a microscopic percent from rounding to a zero threshold.
+    return budget ? Math.max(1, Math.round(budget * t.pct / 100)) : null
+  }
+  const warnTokens = toTokens(config.warnThreshold)
+  const denyTokens = toTokens(config.denyThreshold)
+
   // Fast path: even at the worst possible byte-to-token ratio this file cannot
   // reach the warn threshold, so never read it. Most skills exit here after a
   // single stat().
@@ -279,28 +333,30 @@ function main (raw) {
   // warnThreshold specifically. Two reasons: warnThreshold may be null (off)
   // while denyThreshold is set, and a denyThreshold below warnThreshold would
   // otherwise let the guard skip a file it was configured to block outright.
-  const active = [config.warnThreshold, config.denyThreshold].filter(t => t !== null)
+  const active = [warnTokens, denyTokens].filter(t => t !== null)
   if (!active.length && !config.logPath) return // nothing can fire and nothing to record
 
   // The ceil is load-bearing, not cosmetic: estimateTokens ends in Math.ceil, so
   // for a pure-ASCII file the exact quotient can sit a fraction below the real
   // token count. Rounding the bound up restores the strict inequality.
-  if (!config.logPath && Math.ceil(found.size / BYTES_PER_TOKEN_FLOOR) < Math.min(...active)) return
+  if (!config.logPath && active.length && Math.ceil(found.size / BYTES_PER_TOKEN_FLOOR) < Math.min(...active)) return
 
   const text = readFileSync(found.path, 'utf8')
   const { tokens, kind } = estimateTokens(text)
 
   let decision = 'allow'
-  if (config.denyThreshold !== null && tokens >= config.denyThreshold) decision = 'deny'
-  else if (config.warnThreshold !== null && tokens >= config.warnThreshold) decision = 'ask'
+  if (denyTokens !== null && tokens >= denyTokens) decision = 'deny'
+  else if (warnTokens !== null && tokens >= warnTokens) decision = 'ask'
 
   // ts first so a tail of the log reads chronologically. The log exists to pick a
   // threshold from real usage, which means slicing it by session or by date —
   // impossible without a time field.
   log(config, { ts: new Date().toISOString(), skill, bytes: found.size, tokens, kind, decision })
-  // reason() is built only when something will be said — it is the one place
-  // the transcript tail gets read, and an allowed skill must not pay for it.
-  if (decision !== 'allow') emit(decision, reason(skill, tokens, config, decision, payload.transcript_path))
+  // reason() is built only when something will be said. With number thresholds
+  // this is where the transcript tail gets read (via budgetCtx) — an allowed
+  // skill never pays for it; with a percent threshold it was already read and
+  // memoized above.
+  if (decision !== 'allow') emit(decision, reason(skill, tokens, config, decision, budgetCtx(), denyTokens))
 }
 
 let input = ''
