@@ -167,6 +167,10 @@ npm test
 
 100+ integration checks that drive the real hook binary with real payloads on stdin and assert on stdout — the contract under test is never mocked. Includes a timing loop so overhead regressions show up.
 
+## Releases
+
+Every version bump on `main` is tagged and published to [GitHub Releases](https://github.com/RobusGauli/context-bloat-guard/releases) automatically, with notes generated from the merged PRs — check there before `/plugin update` to see what changed. The version in `.claude-plugin/plugin.json` is the source of truth; `npm test` refuses drift between the three manifests.
+
 ## Portability
 
 Supported on macOS and Linux. Windows is not supported and not tested.
