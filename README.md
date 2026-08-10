@@ -14,8 +14,8 @@ A `PreToolUse` hook on the `Skill` tool measures the SKILL.md that is about to l
 
 ```
 Skill "compound-engineering:ce-code-review" will inject ~42,900 tokens = 26% of
-your 167k usable context (200k window, less the auto-compact buffer and
-reserved output) into this context, permanently for the rest of the session.
+your 167k usable context (200k window, less the auto-compact buffer) into
+this context, permanently for the rest of the session.
 
 Cheaper alternative: delegate it. Spawn a subagent (Agent tool) that invokes
 this skill in its own isolated context and returns only the conclusion — the
@@ -104,7 +104,7 @@ A percentage is only as good as its denominator, and a hardcoded `200000` was wr
 3. **`CLAUDE_CODE_AUTO_COMPACT_WINDOW`** — the figure `/context` displays.
 4. **The model's API ceiling**, clamped to the 200k base tier only when an off-switch is active: `CLAUDE_CODE_DISABLE_1M_CONTEXT=1`, or `ANTHROPIC_BASE_URL` pointing at an LLM gateway (where the CLI can't verify 1M support). An explicit `[1m]` model variant counts as 1M even behind a gateway.
 
-Then the buffer comes off. The nominal window is not what a skill competes for: a 200k window carries a ~33k auto-compact buffer, and output tokens are reserved on top. Measured live via `/context`: a 200k window reported 167k available. `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` and `CLAUDE_CODE_MAX_OUTPUT_TOKENS` are honoured when present.
+Then the buffer comes off. The nominal window is not what a skill competes for: the CLI holds back a **flat 33k auto-compact reserve** regardless of window size — measured via `/context` (2026-08-10, CLI 2.1.226): a 200k window reports 167k available, a 1M sonnet-5 window reports 967k, the same 33k at both. Two env vars this plugin used to honour were measured to have no effect on the CLI's accounting and are no longer read: `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` (byte-identical output whether unset, 50, or 80) and `CLAUDE_CODE_MAX_OUTPUT_TOKENS` (not deducted from input-side accounting).
 
 Two things worth knowing about step 4. **1M is the default on current frontier models, not a beta opt-in** — measured 2026-08-10 via `/context`: a default `claude-sonnet-5` session reports a ~1M window, and the same container with `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` reports 200k. (An earlier measurement that suggested a universal 200k cap turned out to have that flag injected by server-managed settings.) And **the model signal is fuzzy** from a hook: only `$ANTHROPIC_MODEL` is readable, and it can be unset or stale. That's tolerable because every current frontier row in the table is 1M and the off-switches apply regardless of which row matched. One residual risk is deliberate: a Pro-plan Opus session without usage credits actually runs at 200k, but the plan is invisible to a hook — set `contextWindowSize` if that's you.
 
